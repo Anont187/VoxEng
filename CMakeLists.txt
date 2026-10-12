@@ -30,6 +30,8 @@ set(SOURCES
     glad.c
 )
 
+add_executable(gameEngine ${SOURCES})
+
 if(WIN32)
   target_link_libraries(gameEngine glfw3 opengl32 gdi32 psapi)
   target_link_options(gameEngine PRIVATE -static)
