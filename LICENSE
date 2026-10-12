@@ -163,3 +163,34 @@ whether future versions of the GNU Lesser General Public License shall
 apply, that proxy's public statement of acceptance of any version is
 permanent authorization for you to choose that version for the
 Library.
+
+=============================================================================
+ADDITIONAL TERMS (Allowed under LGPLv3 Section 2 / GPLv3 Section 7)
+=============================================================================
+
+The software core of VoxEng is licensed under the GNU Lesser General Public 
+License version 3.0 (LGPLv3). In accordance with Section 7 of the GNU General 
+Public License version 3.0 (GPLv3), which is incorporated by reference into 
+the LGPLv3 under Section 2, the copyright holder hereby places the following 
+reasonable additional terms and obligations upon licensees:
+
+1. PUBLIC ATTRIBUTION & LINKING REQUIREMENT:
+Any software, game, interactive media, or public demonstration (including 
+but not limited to video recordings, promotional material, livestreamed 
+media, blog posts, and public developer logs) that utilizes, integrates, 
+links to, embeds, or derives from this engine core must display a prominent, 
+human-readable attribution notice and clickable hyperlink pointing back to 
+the original source repository.
+
+The notice must be clearly visible to the end-user or audience within the 
+primary credits, interface, or public description text, and must read 
+substantially as follows:
+"Powered by VoxEng - https://github.com"
+
+2. LINKING METHODS:
+This attribution, source availability, and linking requirement applies 
+uniformly, regardless of whether the VoxEng engine core is dynamically linked 
+as an external shared library (e.g., .dll, .so, .dylib) or statically linked 
+directly into the derivative work's executable binary. Static linking shall 
+not be used as a mechanism to obscure or waive the attribution obligations 
+outlined herein.
