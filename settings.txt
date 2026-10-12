@@ -1,0 +1,50 @@
+
+int pastWidth = 640;
+int pastHeight = 480;
+
+float timeOfDay = 0.15f;  // 0=dawn, 0.25=noon, 0.5=dusk, 0.75=midnight. Start mid-morning.
+float cameraSpeed = 4.3f;
+float sprintSpeed = 16.0f;
+float baseSensitivity = 0.071f;
+float bfov = 70.0f;
+
+const float PI = 3.14159265f;
+const float dayLengthSec = 360.0f;
+
+constexpr int chunkSize = 32;
+constexpr int worldHeight = 256;
+constexpr int chunksPerColumn = worldHeight / chunkSize;
+constexpr int renderRadius = 2;
+constexpr int noiseStep = 2;
+constexpr int noiseGridSize = chunkSize / noiseStep + 1;
+constexpr int maxChunkSlots = 256;
+constexpr int vboSlotBytes = 510 * 514;
+constexpr int eboSlotBytes = 128 * 1024;
+constexpr int brickSize = 8;
+constexpr int brickDimX = (chunkSize * (renderRadius * 2 + 1)) / brickSize;
+constexpr int brickDimY = worldHeight / brickSize;
+constexpr int brickDimZ = brickDimX;
+constexpr float gravity = 28.0;
+constexpr float jumpVel = 8.0;
+constexpr double doubleTapTime = 0.25;
+constexpr float eyeHeight = 1.6f;
+constexpr float terminalVel = -50.0f;
+constexpr float flyAcceleration = 30.0f;
+constexpr float flyDrag = 6.0f;
+constexpr float flyMaxSpeed = 10.0f;
+constexpr bool kCurtainRays = false;
+constexpr int baseSnowLine = worldHeight * 58 / 100;
+
+const char* stringed = "basic window";
+const float renderScale = 0.76f;
+
+float ssaoRadius = 2.5f;
+float ssaoBias = 0.003f;
+float ssaoIntensity = 1.5f;
+float shadowFactor = 0.10f;
+float giStrength = 0.25f;
+float bloomStrength = 0.20f;
+float exposureKey = 0.18f;
+float exposureBias = 0.5f;
+float exposureSpeed = 1.5f;
+float giDebug = 0.0f;
