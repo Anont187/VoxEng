@@ -627,61 +627,7 @@ void main() {
 
 		vec3 indirect = vec3(0.0);
 
-		const float giRadius = 8.0;
-		const float stepSize = 1.25;
-
-		for (int i = 0; i < 8; i++) {
-			vec2 dir2 = uSsgiOffsets[i];
-
-			float a = float(uFrameIndex) * 0.37;
-			float cs = cos(a);
-			float sn = sin(a);
-
-			dir2 = mat2(cs, -sn, sn, cs) * dir2;
-
-			vec3 rayDir = normalize(normal * 0.35 + tangent * dir2.x + bitTan * dir2.y);
-
-			float cCos = max(dot(normal, rayDir), 0.0);
-			if (cCos <= 0.0) continue;
-
-			for (int step = 1; step <= 6; step++) {
-				float dist = float(step) * stepSize;
-				if (dist > giRadius) break;
-
-				vec3 rayPos = fragPos + rayDir * dist;
-
-				vec4 clip = viewProj * vec4(rayPos, 1.0);
-				if (clip.w <= 0.0) break;
-
-				vec2 sampleUv = clip.xy / clip.w * 0.5 + 0.5;
-
-				if (sampleUv.x <= 0.0 || sampleUv.x >= 1.0 || sampleUv.y <= 0.0 || sampleUv.y >= 1.0) break;
-
-				float sceneDepth = texture(uSceneDepth, sampleUv).r;
-				if (sceneDepth >= 0.99999) continue;
-				float sceneZ = linearDepth(sceneDepth);
-				float rayZ = clip.w;
-				float giRange = smoothstep(0.0, 1.0, uSsaoRadius / max(abs(fragZ - sceneZ), 1e-4));
-				if (sceneZ < rayZ - uSsaoBias) {
-					vec3 hitNormal = texture(uSceneNormal, sampleUv).xyz * 2.0 - 1.0;
-					hitNormal = normalize(hitNormal);
-
-					vec3 hitColor = texture(uScene, sampleUv).rgb;
-					vec3 bouncelight = hitColor + vec3(0.035, 0.045, 0.060);
-
-					float hitCos = max(dot(hitNormal, -rayDir), 0.0);
-					float falloff = 1.0 - dist / giRadius;
-
-					indirect += hitColor * cCos * hitCos * falloff * giRange;
-
-					break;
-				}
-			}
-		}
-
-		indirect *= uGiStrength / 8.0;
-
-		fragColor = vec4(ao, indirect.r, indirect.g, indirect.b);
+		fragColor = vec4(ao, 0.0, 0.0, 0.0);
 
 		return;
 	}

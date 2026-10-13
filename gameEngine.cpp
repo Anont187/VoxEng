@@ -2534,7 +2534,7 @@ int main() {
     	glm::ivec3(0)
     };
 
-    int giVoxelSizeArr[giCascades] = { 1, 2, 4 };
+    float giVoxelSizeArr[giCascades] = { 1, 2, 4 };
 
    	glUniform1i(glGetUniformLocation(shaderProgram, "uGiDebug"), (int)setting("giDebug", 0.0f));
 
