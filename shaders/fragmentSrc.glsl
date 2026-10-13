@@ -625,8 +625,6 @@ void main() {
 
 		float ao = mix(0.55, 1.0, aoRaw);
 
-		vec3 indirect = vec3(0.0);
-
 		fragColor = vec4(ao, 0.0, 0.0, 0.0);
 
 		return;
