@@ -38,7 +38,7 @@ constexpr int baseSnowLine = worldHeight * 58 / 100;
 const char* stringed = "basic window";
 const float renderScale = 0.76f;
 
-float ssaoRadius = 2.5f;
+float ssaoRadius = 0.75f;
 float ssaoBias = 0.003f;
 float ssaoIntensity = 1.5f;
 float shadowFactor = 0.10f;
