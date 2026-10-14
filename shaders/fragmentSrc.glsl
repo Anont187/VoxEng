@@ -533,12 +533,18 @@ void main() {
 		vec4 result = vec4(0.0);
 
 		float wsum = 0.0;
+		float centerDepth = linearDepth(texture(uSceneDepth, vSkyUv).r);
 
-		for (int x = -2; x <= 2; x++) {
-			for (int y = -2; y <= 2; y++) {
-				float w = exp(-float(x * x + y * y) * 0.5);
+		for (int x = -4; x <= 4; x++) {
+			for (int y = -4; y <= 4; y++) {
+				vec2 uv = vSkyUv + vec2(x, y) * texel;
 
-				result += texture(uSsaoInput, vSkyUv + vec2(x, y) * texel) * w;
+				float d = linearDepth(texture(uSceneDepth, uv).r);
+				float depthWeight = exp(-abs(d - centerDepth) * 5.0);
+				float spatialWeight = exp(-float(x * x + y * y) * 0.15);
+				float w = depthWeight * spatialWeight;
+
+				result += texture(uSsaoInput, uv) * w;
 
 				wsum += w;
 			}
@@ -605,7 +611,7 @@ void main() {
 
 		float occlusion = 0.0;
 
-		for (int i = 0; i < 12; i++) {
+		for (int i = 0; i < 6; i++) {
 			vec3 samplePos = fragPos + tbn * uSsaoKernel[i] * uSsaoRadius;
 
 			vec4 clip = viewProj * vec4(samplePos, 1.0);
@@ -620,7 +626,7 @@ void main() {
 			if (sceneZ < sampleZ - uSsaoBias) occlusion += range;
 		}
 
-		float aoRaw = 1.0 - (occlusion / 12.0) * uSsaoIntensity;
+		float aoRaw = 1.0 - (occlusion / 6.0) * uSsaoIntensity;
 		aoRaw = clamp(aoRaw, 0.0, 1.0);
 
 		float ao = mix(0.55, 1.0, aoRaw);
@@ -799,7 +805,7 @@ void main() {
 		vec3 sn, sp;
 
 		bool shadowed = false;
-		if (ndotl > 0.0 && sunAmount > 0.0) shadowed = rmDda(rayOrigin, sunDir, 64.0, sn, sp);
+		if (ndotl > 0.0 && sunAmount > 0.0) shadowed = rmDda(rayOrigin, sunDir, 48.0, sn, sp);
 
 		vec3 skyAmb = vec3(0.45, 0.55, 0.70);
 		vec3 grdAmb = vec3(0.20, 0.15, 0.10);
