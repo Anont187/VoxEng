@@ -59,8 +59,8 @@ uniform float uAdaptFactor;
 uniform float uExposureKey;
 uniform float uExposureBias;
 uniform int uGiDebug;
-uniform vec3 giOrigins[3];
-uniform vec3 giVoxelSizes[3];
+uniform ivec3 giOrigins[3];
+uniform float giVoxelSizes[3];
 
 const int brickSize = 8;
 
@@ -455,7 +455,7 @@ float linearDepth(float d) {
 }
 
 vec3 giSampleCascade(int c, vec3 wp) {
-	vec3 p = (wp - giOrigins[c]) / max(giVoxelSizes[c], 1e-3);
+	vec3 p = (wp - vec3(giOrigins[c])) / max(giVoxelSizes[c], 1e-3);
 	if (any(lessThan(p, vec3(0.0))) || any(greaterThan(p, vec3(63.0)))) return vec3(0.0);
 
 	vec3 pf = floor(p);
