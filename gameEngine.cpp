@@ -161,6 +161,13 @@ struct visCmd {
 	float distSq;
 };
 
+struct svoNodeCpu {
+	uint64_t childMask = 0;
+
+	uint32_t childPointer = 0;
+	uint32_t padding = 0;
+};
+
 enum : uint8_t {
 	BlockTypeAir = 0,
 	BlockTypeStone = 1,
@@ -1598,6 +1605,146 @@ static void giFillAndLight(const chunkMap& ch, const glm::ivec3& origin, int vs,
     }
 }
 
+std::vector<svoNodeCpu> buildCpuSvo(const chunkMap& chunks, int playerChunkX, int playerChunkZ) {
+	int originX = (playerChunkX - 1) * chunkSize;
+	int originZ = (playerChunkZ - 1) * chunkSize;
+	int originY = 0;
+
+	auto isSolidWorld = [&](int wx, int wy, int wz) -> bool {
+		return isSolidAtWorld(chunks, wx, wy, wz);
+	};
+
+	std::vector<svoNodeCpu> svoNodes;
+
+	svoNodes.push_back(svoNodeCpu());
+
+	struct nodeJob {
+		int x;
+		int y;
+		int z;
+
+		uint32_t parentPoolIndex;
+
+		int bitIdx;
+	};
+
+	std::vector<nodeJob> level1Job;
+	std::vector<nodeJob> level2Job;
+
+	uint64_t rootMask = 0;
+	for (int bz = 0; bz < 4; bz++) {
+		for (int by = 0; by < 4; by++) {
+			for (int bx = 0; bx < 4; bx++) {
+				int bitIndx = bx + (by * 4) + (bz * 16);
+
+				bool macroHasSolid = false;
+				for (int z = 0; z < 16 && !macroHasSolid; z++) {
+					for (int y = 0; y < 16 && !macroHasSolid; y++) {
+						for (int x = 0; x < 16 && !macroHasSolid; x++) {
+							int wx = originX + (bx * 16) + x;
+							int wy = originY + (by * 16) + y;
+							int wz = originZ + (bz * 16) + z;
+							if (isSolidWorld(wx, wy, wz)) {
+								macroHasSolid = true;
+							}
+						}
+					}
+				}
+
+				if (macroHasSolid) {
+					rootMask |= (1ULL << bitIndx);
+
+					level1Job.push_back({bx, by, bz, 0, bitIndx});
+				}
+			}
+		}
+	}
+
+	svoNodes[0].childMask = rootMask;
+	if (level1Job.empty()) return svoNodes;
+
+	svoNodes[0].childPointer = static_cast<uint32_t>(svoNodes.size());
+
+	uint32_t level1Base = svoNodes[0].childPointer;
+	for (size_t i = 0; i < 64; i++) {
+		svoNodes.push_back(svoNodeCpu());
+	}
+
+	for (const auto& job : level1Job) {
+		uint32_t currentGpuIndx = level1Base + job.bitIdx;
+
+		uint64_t macroMask = 0;
+		for (int bz = 0; bz < 4; bz++) {
+			for (int by = 0; by < 4; by++) {
+				for (int bx = 0; bx < 4; bx++) {
+					int bitIndx = bx + (by * 4) + (bz * 16);
+
+					bool microHasSolid = false;
+					for (int z = 0; z < 4 && !microHasSolid; z++) {
+						for (int y = 0; y < 4 && !microHasSolid; y++) {
+							for (int x = 0; x < 4 && !microHasSolid; x++) {
+								int wx = originX + (job.x * 16) + (bx * 4) + x;
+								int wy = originY + (job.y * 16) + (by * 4) + y;
+								int wz = originZ + (job.z * 16) + (bz * 4) + z;
+								if (isSolidWorld(wx, wy, wz)) {
+									microHasSolid = true;
+								}
+							}
+						}
+					}
+
+					if (microHasSolid) {
+						macroMask |= (1ULL << bitIndx);
+
+						level2Job.push_back({
+							(job.x * 4) + bx,
+							(job.y * 4) + by,
+							(job.z * 4) + bz,
+							currentGpuIndx,
+							bitIndx
+						});
+					}
+				}
+			}
+		}
+		svoNodes[currentGpuIndx].childMask = macroMask;
+	}
+
+	for (const auto& job : level2Job) {
+		uint32_t parentIndx = job.parentPoolIndex;
+		if (svoNodes[parentIndx].childPointer == 0) {
+			svoNodes[parentIndx].childPointer = static_cast<uint32_t>(svoNodes.size());
+
+			for (size_t i = 0; i < 64; i++) {
+				svoNodes.push_back(svoNodeCpu());
+			}
+		}
+
+		uint32_t currentGpuIndx = svoNodes[parentIndx].childPointer + job.bitIdx;
+
+		uint64_t leafMask = 0;
+
+		for (int bz = 0; bz < 4; bz++) {
+			for (int by = 0; by < 4; by++) {
+				for (int bx = 0; bx < 4; bx++) {
+					int bitIndx = bx + (by * 4) + (bz * 16);
+					int wx = originX + (job.x * 4) + bx;
+					int wy = originY + (job.y * 4) + by;
+					int wz = originZ + (job.z * 4) + bz;
+					if (isSolidWorld(wx, wy, wz)) {
+						leafMask |= (1ULL < bitIndx);
+					}
+				}
+			}
+		}
+
+		svoNodes[currentGpuIndx].childMask = leafMask;
+		svoNodes[currentGpuIndx].childPointer = 0;
+	}
+
+	return svoNodes;
+}
+
 int main() {
 	std::cout << "STARTUP: START\n" << std::flush;
 	std::cout << "STARTUP: Loading settings from settings.txt..." << std::flush;
@@ -2536,6 +2683,14 @@ int main() {
 
     float giVoxelSizeArr[giCascades] = { 1, 2, 4 };
 
+    GLuint svoSsbo;
+
+    glGenBuffers(1, &svoSsbo);
+
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, svoSsbo);
+
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svoSsbo);
+
    	glUniform1i(glGetUniformLocation(shaderProgram, "uGiDebug"), (int)setting("giDebug", 0.0f));
 
 	std::cout << "STARTUP: EOF\n" << std::flush;
@@ -2719,6 +2874,13 @@ int main() {
 		    rebuildChunks();
 		    uploadVoxelTbo();
 		    uploadBrickTbo();
+
+		    std::vector<svoNodeCpu> currentSvo = buildCpuSvo(chunks, playerChunkX, playerChunkZ);
+
+		    glBindBuffer(GL_SHADER_STORAGE_BUFFER, svoSsbo);
+		    glBufferData(GL_SHADER_STORAGE_BUFFER, currentSvo.size() * sizeof(svoNodeCpu), currentSvo.data(), GL_DYNAMIC_DRAW);
+
+		    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
 			lastTboChunkX = newChunkX;
 			lastTboChunkZ = newChunkZ;
