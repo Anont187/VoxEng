@@ -1732,7 +1732,7 @@ std::vector<svoNodeCpu> buildCpuSvo(const chunkMap& chunks, int playerChunkX, in
 					int wy = originY + (job.y * 4) + by;
 					int wz = originZ + (job.z * 4) + bz;
 					if (isSolidWorld(wx, wy, wz)) {
-						leafMask |= (1ULL < bitIndx);
+						leafMask |= (1ULL << bitIndx);
 					}
 				}
 			}
