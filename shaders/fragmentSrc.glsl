@@ -6,6 +6,17 @@ layout(std430, binding = 0) readonly buffer GiVolume {
 	uint giVoxels[];
 };
 
+struct svoNodeGpu {
+	uvec2 childMask;
+
+	uint childPointer;
+	uint padding;
+};
+
+layout(std430, binding = 2) readonly buffer svoVolume {
+	svoNodeGpu svoNodes[];
+};
+
 in vec2 vUv;
 in vec2 vSkyUv;
 in vec3 vWorldPos;
@@ -202,6 +213,58 @@ bool rmBrickOccupied(ivec3 brickIdx) {
 	return texelFetch(brickTbo, idx).r != 0u;
 }
 
+bool rmSvoBitSet(uvec2 mask, int bitIndex) {
+	if (bitIndex < 32) {
+		return (mask.x & (1u << uint(bitIndex))) != 0u;
+	}
+
+	return (mask.y & (1u << uint(bitIndex - 32))) != 0u;
+}
+
+int rmSvoEmptyCellSize(ivec3 worldVoxel) {
+	ivec3 svoOrigin = ivec3(
+		(playerChunkX - 1) * 32,
+		0,
+		(playerChunkZ - 1) * 32
+	);
+
+	ivec3 local = worldVoxel - svoOrigin;
+	if (any(lessThan(local, ivec3(0))) || any(greaterThanEqual(local, ivec3(64)))) {
+		return -1;
+	}
+
+	int rootBit = (local.x >> 4) + ((local.y >> 4) * 4) + ((local.z >> 4) * 16);
+	if (!rmSvoBitSet(svoNodes[0].childMask, rootBit)) {
+		return 16;
+	}
+
+	int macroIndx = int(svoNodes[0].childPointer) + rootBit;
+
+	svoNodeGpu macroNode = svoNodes[macroIndx];
+
+	int microX = (local.x >> 2) & 3;
+	int microY = (local.y >> 2) & 3;
+	int microZ = (local.z >> 2) & 3;
+	int microBit = microX + microY * 4 + microZ * 16;
+	if (!rmSvoBitSet(macroNode.childMask, microBit)) {
+		return 4;
+	}
+
+	int leafIndex = int(macroNode.childPointer) + microBit;
+
+	svoNodeGpu leafNode = svoNodes[leafIndex];
+
+	int voxelX = local.x & 3;
+	int voxelY = local.y & 3;
+	int voxelZ = local.z & 3;
+	int voxelBit = voxelX + voxelY * 4 + voxelZ * 16;
+	if (rmSvoBitSet(leafNode.childMask, voxelBit)) {
+		return 0;
+	}
+
+	return 1;
+}
+
 bool rmDda(vec3 ro, vec3 rd, float maxDist, out vec3 outNormal, out vec3 outHitPos) {
 	ivec3 v = ivec3(floor(ro));
 	ivec3 s = ivec3(sign(rd));
@@ -211,17 +274,17 @@ bool rmDda(vec3 ro, vec3 rd, float maxDist, out vec3 outNormal, out vec3 outHitP
 	vec3 fr = fract(ro);
 	vec3 tMax;
 
-	tMax.x = (rd.x > 0.0) ? (1.0 - fr.x) * tDelta.x : fr.x * tDelta.x;
-    tMax.y = (rd.y > 0.0) ? (1.0 - fr.y) * tDelta.y : fr.y * tDelta.y;
-    tMax.z = (rd.z > 0.0) ? (1.0 - fr.z) * tDelta.z : fr.z * tDelta.z;
+	tMax.x = (rd.x > 0.0) ? (1.0 - fr.x) * tDelta.x : (rd.x < 0.0) ? fr.x * tDelta.x : 1e30;
+    tMax.y = (rd.y > 0.0) ? (1.0 - fr.y) * tDelta.y : (rd.y < 0.0) ? fr.y * tDelta.y : 1e30;
+    tMax.z = (rd.z > 0.0) ? (1.0 - fr.z) * tDelta.z : (rd.z < 0.0) ? fr.z * tDelta.z : 1e30;
 
     ivec3 bv = v >> 3;
 
     vec3 brickDelta = vec3(brickSize) * abs(invRd);
     vec3 brickTMax;
 
-    brickTMax.x = (rd.x > 0.0) ? (float((bv.x + 1) * brickSize) - ro.x) * invRd.x : (float(bv.x * brickSize) - ro.x) * invRd.x;
-    brickTMax.y = (rd.y > 0.0) ? (float((bv.y + 1) * brickSize) - ro.y) * invRd.y : (float(bv.y * brickSize) - ro.y) * invRd.y;
+    brickTMax.x = (rd.x > 0.0) ? (float((bv.x + 1) * brickSize) - ro.x) * invRd.x : (rd.x < 0.0) ? (float(bv.x * brickSize) - ro.x) * invRd.x : 1e30;
+    brickTMax.y = (rd.y > 0.0) ? (float((bv.y + 1) * brickSize) - ro.y) * invRd.y : (rd.y < 0.0) ? (float(bv.y * brickSize) - ro.y) * invRd.y : 1e30;
     brickTMax.z = (rd.z > 0.0) ? (float((bv.z + 1) * brickSize) - ro.z) * invRd.z : (rd.z < 0.0) ? (float(bv.z * brickSize) - ro.z) * invRd.z : 1e30;
 
     ivec3 brickOrigin = ivec3((playerChunkX - 2) * 32, 0, (playerChunkZ - 2) * 32) >> 3;
@@ -234,9 +297,82 @@ bool rmDda(vec3 ro, vec3 rd, float maxDist, out vec3 outNormal, out vec3 outHitP
     outNormal = vec3(0.0);
     outHitPos = vec3(0.0);
 
-    for (int i = 0; i <= int(maxHeightTerrain) / 2; i++) {
+    int maxSteps = int(ceil(maxDist * (abs(rd.x) + abs(rd.y) + abs(rd.z)))) + 8;
+
+    for (int i = 0; i <= maxSteps; i++) {
     	if (t > maxDist) break;
         if (v.y < 0 || v.y >= maxHeightTerrain) break;
+
+        int svoSize = rmSvoEmptyCellSize(v);
+        if (svoSize == 0 && rmGetVoxel(v)) {
+        	outHitPos = ro + rd * t;
+
+        	return true;
+        }
+
+        if (svoSize > 1) {
+        	ivec3 svoOrigin = ivec3((playerChunkX - 1) * 32, 0, (playerChunkZ - 1) * 32);
+
+        	ivec3 local = v - svoOrigin;
+        	ivec3 cellMin = svoOrigin + (local / svoSize) * svoSize;
+        	ivec3 cellMax = cellMin + ivec3(svoSize);
+
+        	float tx = 1e30;
+        	float ty = 1e30;
+        	float tz = 1e30;
+        	if (rd.x > 0.0) {
+        		tx = (float(cellMax.x) - ro.x) / rd.x;
+        	} else if (rd.x < 0.0) {
+        		tx = (float(cellMin.x) - ro.x) / rd.x;
+        	}
+
+        	if (rd.y > 0.0) {
+        		ty = (float(cellMax.y) - ro.y) / rd.y;
+        	} else if (rd.y < 0.0) {
+        		ty = (float(cellMin.y) - ro.y) / rd.y;
+        	}
+
+        	if (rd.z > 0.0) {
+        		tz = (float(cellMax.z) - ro.z) / rd.z;
+        	} else if (rd.z < 0.0) {
+        		tz = (float(cellMin.z) - ro.z) / rd.z;
+        	}
+
+        	float nextCellT = min(tx, min(ty, tz));
+        	if (nextCellT > maxDist) break;
+        	if (tx < ty && tx < tz) {
+        		outNormal = vec3(-sign(rd.x), 0.0, 0.0);
+        	} else if (ty < tz) {
+        		outNormal = vec3(0.0, -sign(rd.y), 0.0);
+        	} else {
+        		outNormal = vec3(0.0, 0.0, -sign(rd.z));
+        	}
+
+        	t = max(nextCellT, t) + 1e-4;
+        	if (t > maxDist) break;
+
+        	vec3 pos = ro + rd * t;
+
+        	v = ivec3(floor(pos));
+
+        	fr = fract(pos);
+
+        	tMax.x = (rd.x > 0.0) ? t + (1.0 - fr.x) * tDelta.x : (rd.x < 0.0) ? t + fr.x * tDelta.x : 1e30;
+            tMax.y = (rd.y > 0.0) ? t + (1.0 - fr.y) * tDelta.y : (rd.y < 0.0) ? t + fr.y * tDelta.y : 1e30;
+            tMax.z = (rd.z > 0.0) ? t + (1.0 - fr.z) * tDelta.z : (rd.z < 0.0) ? t + fr.z * tDelta.z : 1e30;
+
+            bv = v >> 3;
+
+            brickTMax.x = (rd.x > 0.0) ? (float((bv.x + 1) * brickSize) - ro.x) * invRd.x : (rd.x < 0.0) ? (float(bv.x * brickSize) - ro.x) * invRd.x : 1e30;
+            brickTMax.y = (rd.y > 0.0) ? (float((bv.y + 1) * brickSize) - ro.y) * invRd.y : (rd.y < 0.0) ? (float(bv.y * brickSize) - ro.y) * invRd.y : 1e30;
+            brickTMax.z = (rd.z > 0.0) ? (float((bv.z + 1) * brickSize) - ro.z) * invRd.z : (rd.z < 0.0) ? (float(bv.z * brickSize) - ro.z) * invRd.z : 1e30;
+        
+            tboBrick = bv - brickOrigin;
+
+            brickOccupied = rmBrickOccupied(tboBrick);
+
+            continue;
+        }
 
         if (!brickOccupied) {
         	float nextBrickT = min(min(brickTMax.x, brickTMax.y), brickTMax.z);
@@ -264,9 +400,9 @@ bool rmDda(vec3 ro, vec3 rd, float maxDist, out vec3 outNormal, out vec3 outHitP
             v = ivec3(floor(pos));
             fr = fract(pos);
 
-            tMax.x = (rd.x > 0.0) ? (1.0 - fr.x) * tDelta.x : fr.x * tDelta.x;
-            tMax.y = (rd.y > 0.0) ? (1.0 - fr.y) * tDelta.y : fr.y * tDelta.y;
-            tMax.z = (rd.z > 0.0) ? (1.0 - fr.z) * tDelta.z : fr.z * tDelta.z;
+            tMax.x = (rd.x > 0.0) ? t + (1.0 - fr.x) * tDelta.x : (rd.x < 0.0) ? t + fr.x * tDelta.x : 1e30;
+            tMax.y = (rd.y > 0.0) ? t + (1.0 - fr.y) * tDelta.y : (rd.y < 0.0) ? t + fr.y * tDelta.y : 1e30;
+            tMax.z = (rd.z > 0.0) ? t + (1.0 - fr.z) * tDelta.z : (rd.z < 0.0) ? t + fr.z * tDelta.z : 1e30;
             
             bv = v >> 3;
 
@@ -535,8 +671,8 @@ void main() {
 		float wsum = 0.0;
 		float centerDepth = linearDepth(texture(uSceneDepth, vSkyUv).r);
 
-		for (int x = -4; x <= 4; x++) {
-			for (int y = -4; y <= 4; y++) {
+		for (int x = -1; x <= 1; x++) {
+			for (int y = -1; y <= 1; y++) {
 				vec2 uv = vSkyUv + vec2(x, y) * texel;
 
 				float d = linearDepth(texture(uSceneDepth, uv).r);
@@ -804,8 +940,11 @@ void main() {
 		vec3 rayOrigin = vWorldPos + normal * 0.05 + sunDir * 0.01;
 		vec3 sn, sp;
 
+		float viewDist = length(vWorldPos - camPos);
+		float shadowMaxDist = mix(24.0, 6.0, smoothstep(24.0, 112.0, viewDist));
+
 		bool shadowed = false;
-		if (ndotl > 0.0 && sunAmount > 0.0) shadowed = rmDda(rayOrigin, sunDir, 48.0, sn, sp);
+		if (ndotl > 0.0 && sunAmount > 0.0) shadowed = rmDda(rayOrigin, sunDir, shadowMaxDist, sn, sp);
 
 		vec3 skyAmb = vec3(0.45, 0.55, 0.70);
 		vec3 grdAmb = vec3(0.20, 0.15, 0.10);

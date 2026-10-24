@@ -1611,7 +1611,20 @@ std::vector<svoNodeCpu> buildCpuSvo(const chunkMap& chunks, int playerChunkX, in
 	int originY = 0;
 
 	auto isSolidWorld = [&](int wx, int wy, int wz) -> bool {
-		return isSolidAtWorld(chunks, wx, wy, wz);
+		if (wy < 0 || wy >= worldHeight) return false;
+
+		int cx = floorDiv(wx, chunkSize);
+		int cy = floorDiv(wy, chunkSize);
+		int cz = floorDiv(wz, chunkSize);
+
+		const Chunk* c = getChunkAt(chunks, cx, cy, cz);
+		if (!c) return false;
+
+		int lx = wx - cx * chunkSize;
+		int ly = wy - cy * chunkSize;
+		int lz = wz - cz * chunkSize;
+
+		return isSolid(*c, lx, ly, lz);
 	};
 
 	std::vector<svoNodeCpu> svoNodes;
