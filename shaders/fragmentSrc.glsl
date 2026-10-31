@@ -303,6 +303,10 @@ bool rmDda(vec3 ro, vec3 rd, float maxDist, out vec3 outNormal, out vec3 outHitP
     	if (t > maxDist) break;
         if (v.y < 0 || v.y >= maxHeightTerrain) break;
 
+        int dxChunk = (v.x >> 5) - playerChunkX;
+        int dzChunk = (v.z >> 5) - playerChunkZ;
+        if (dxChunk < -2 || dxChunk > 2 || dzChunk < -2 || dzChunk > 2) break;
+
         int svoSize = rmSvoEmptyCellSize(v);
         if (svoSize == 0 && rmGetVoxel(v)) {
         	outHitPos = ro + rd * t;
@@ -622,15 +626,16 @@ vec3 giSampleCascade(int c, vec3 wp) {
 
 vec3 giSample(vec3 wp) {
 	float d = length(wp - camPos);
-	if (d < 28.0) return giSampleCascade(0, wp);
-	if (d < 56.0) {
-		float t = smoothstep(28.0, 40.0, d);
+	if (d < 24.0) return giSampleCascade(0, wp);
+	if (d < 32.0) {
+		float t = smoothstep(24.0, 32.0, d);
 
 		return mix(giSampleCascade(0, wp), giSampleCascade(1, wp), t);
 	}
 
-	if (d < 112.0) {
-		float t = smoothstep(56.0, 80.0, d);
+	if (d < 56.0) return giSampleCascade(1, wp);
+	if (d < 72.0) {
+		float t = smoothstep(56.0, 72.0, d);
 
 		return mix(giSampleCascade(1, wp), giSampleCascade(2, wp), t);
 	}
@@ -941,10 +946,13 @@ void main() {
 		vec3 sn, sp;
 
 		float viewDist = length(vWorldPos - camPos);
-		float shadowMaxDist = mix(24.0, 6.0, smoothstep(24.0, 112.0, viewDist));
+		float sunHigh = clamp(sunDir.y, 0.0, 1.0);
+		float shadowMaxDist = mix(20.0, 8.0, sunHigh);
+
+		shadowMaxDist *= mix(1.0, 0.4, smoothstep(16.0, 96.0, viewDist));
 
 		bool shadowed = false;
-		if (ndotl > 0.0 && sunAmount > 0.0) shadowed = rmDda(rayOrigin, sunDir, shadowMaxDist, sn, sp);
+		if (ndotl > 0.05 && sunAmount > 0.05 && viewDist < 96.0) shadowed = rmDda(rayOrigin, sunDir, shadowMaxDist, sn, sp);
 
 		vec3 skyAmb = vec3(0.45, 0.55, 0.70);
 		vec3 grdAmb = vec3(0.20, 0.15, 0.10);
@@ -953,7 +961,16 @@ void main() {
 		float shadowFactor = shadowed ? uShadowFactor : 1.0;
 
 		vec3 direct = ambient + sunColor * ndotl * sunAmount * shadowFactor;
-		vec3 indirect = giSample(vWorldPos + normal * 1.25) * uGiStrength;
+		vec3 indirect = vec3(0.0);
+
+		bool wantGi = shadowed || normal.y < 0.9;
+		if (wantGi) {
+			if (viewDist < 128.0) {
+				indirect = giSample(vWorldPos + normal * 1.25) * uGiStrength;
+			} else {
+				indirect = vec3(0.15, 0.18, 0.22) * sunAmount * uGiStrength;
+			}
+		}
 
 		color = texColor * (direct + indirect);
 	}
