@@ -42,9 +42,11 @@ static std::string readFile(const std::string& path) {
 
 std::string vertexShaderSource = readFile("shaders/vertexSrc.glsl");
 std::string fragmentShaderSource = readFile("shaders/fragmentSrc.glsl");
+std::string computeShaderSource = readFile("shaders/computeSrc.glsl");
 
 const char* vertexSrc = vertexShaderSource.c_str();
 const char* fragmentSrc = fragmentShaderSource.c_str();
+const char* computeSrc = computeShaderSource.c_str();
 
 int pastWidth = 640;
 int pastHeight = 480;
@@ -1605,6 +1607,49 @@ static void giFillAndLight(const chunkMap& ch, const glm::ivec3& origin, int vs,
     }
 }
 
+static void giBuildVoxelTypes(const chunkMap& chunks, const glm::ivec3 origin, int vs, std::vector<uint32_t>& out) {
+	const int n = giDim;
+
+	out.assign(giVoxelsPerCascade, 0u);
+
+	const Chunk* cached = nullptr;
+
+	int oldCx = 0;
+	int oldCy = 0;
+	int oldCz = 0;
+
+	bool cacheValid = false;
+
+	for (int z = 0; z < n; z++) {
+		for (int y = 0; y < n; y++) {
+			for (int x = 0; x < n; x++) {
+				int wx = origin.x + x * vs;
+				int wy = origin.y + y * vs;
+				int wz = origin.z + z * vs;
+
+				int cx = floorDiv(wx, chunkSize);
+				int cy = floorDiv(wy, chunkSize);
+				int cz = floorDiv(wz, chunkSize);
+				if (!cacheValid || cx != oldCx || cy != oldCy || cz != oldCz) {
+					cached = getChunkAt(chunks, cx, cy, cz);
+
+					oldCx = cx;
+					oldCy = cy;
+					oldCz = cz;
+
+					cacheValid = true;
+				}
+
+				if (!cached) continue;
+
+				uint8_t type = getVoxel(*cached, wx - cx * chunkSize, wy - cy * chunkSize, wz - cz * chunkSize);
+
+				out[(z * n + y) * n + x] = type;
+			}
+		}
+	}
+}
+
 std::vector<svoNodeCpu> buildCpuSvo(const chunkMap& chunks, int playerChunkX, int playerChunkZ) {
 	int originX = (playerChunkX - 1) * chunkSize;
 	int originZ = (playerChunkZ - 1) * chunkSize;
@@ -1836,6 +1881,7 @@ int main() {
 
 	GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
 	GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+	GLuint computeShader = glCreateShader(GL_COMPUTE_SHADER);
 	GLuint shaderProgram = glCreateProgram();
 
 	int success;
@@ -1876,12 +1922,37 @@ int main() {
         printf("Program linking Ran into a problem:\n%s\n", infolog);
     }
 
+    glShaderSource(computeShader, 1, &computeSrc, nullptr);
+	glCompileShader(computeShader);
+
+	glGetShaderiv(computeShader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(computeShader, sizeof(infolog), NULL, infolog);
+        printf("Compute Shader Ran into a problem:\n%s\n", infolog);
+    }
+
+	std::cout << "STARTUP: Made Compute Shader\n" << std::flush;
+
+	GLuint computeProgram = glCreateProgram();
+
+	glAttachShader(computeProgram, computeShader);
+	glLinkProgram(computeProgram);
+
+	glGetProgramiv(computeProgram, GL_LINK_STATUS, &success);
+    if (!success) {
+        glGetProgramInfoLog(computeProgram, sizeof(infolog), NULL, infolog);
+        printf("Compute Program linking Ran into a problem:\n%s\n", infolog);
+    }
+
+	std::cout << "STARTUP: Made Compute Program\n" << std::flush;
+
     if (success) {
-    	std::cout << "STARTUP: No shader errors.\n" << std::flush;
+    	std::cout << "STARTUP: No shader and shader program errors.\n" << std::flush;
     }
 
 	glDeleteShader(vertexShader);
 	glDeleteShader(fragmentShader);
+	glDeleteShader(computeShader);
 
 	const char* texPaths[] = {
 		"textures/dirt.png",
@@ -2338,6 +2409,13 @@ int main() {
 
     std::cout << "STARTUP: Made LOOKUP locations for glUniform\n" << std::flush;
 
+    GLint giStageLoc = glGetUniformLocation(computeProgram, "uStage");
+	GLint giReadALoc = glGetUniformLocation(computeProgram, "uReadA");
+	GLint giCascadeLoc = glGetUniformLocation(computeProgram, "uCascadeIndex");
+	GLint giSunDirLoc = glGetUniformLocation(computeProgram, "uSunDir");
+
+    std::cout << "STARTUP: Made Compute LOOKUP Locations.\n" << std::flush;
+
 	double time = 0;
 	double lastFrame = 0;
 
@@ -2678,15 +2756,45 @@ int main() {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     GLuint giSsbo = 0;
+    GLuint giVoxelSsbo = 0;
+	GLuint giBaseSsbo = 0;
+	GLuint giLightA = 0;
+	GLuint giLightB = 0;
 
     glGenBuffers(1, &giSsbo);
+    glGenBuffers(1, &giVoxelSsbo);
+    glGenBuffers(1, &giBaseSsbo);
+    glGenBuffers(1, &giLightA);
+    glGenBuffers(1, &giLightB);
+
+    GLsizeiptr voxelBytes = (GLsizeiptr)giVoxelsPerCascade * sizeof(uint32_t);
+    GLsizeiptr lightBytes = (GLsizeiptr)giVoxelsPerCascade * sizeof(float) * 4;
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, giSsbo);
     glBufferData(GL_SHADER_STORAGE_BUFFER, giCascades * giVoxelsPerCascade * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
 
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, voxelBytes, nullptr, GL_DYNAMIC_DRAW);
+	
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, giBaseSsbo);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, lightBytes, nullptr, GL_DYNAMIC_DRAW);
+	
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, giLightA);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, lightBytes, nullptr, GL_DYNAMIC_DRAW);
+	
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, giLightB);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, lightBytes, nullptr, GL_DYNAMIC_DRAW);
+
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, giVoxelSsbo);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, giBaseSsbo);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, giLightA);
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, giLightB);
+
+	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     std::vector<uint32_t> giCpu;
+    std::vector<uint32_t> giVoxelTypes(giVoxelsPerCascade);
 
     glm::ivec3 giOrigin[giCascades] = {
     	glm::ivec3(0),
@@ -2929,6 +3037,84 @@ int main() {
 		}
 
 		tabWasDown = tabDown;
+
+		if (lightingMode == 1) {
+            const int px = (int)std::floor(camPos.x);
+            const int py = (int)std::floor(camPos.y);
+            const int pz = (int)std::floor(camPos.z);
+
+            glm::ivec3 giWant[giCascades];
+
+            bool dirty[giCascades];
+            bool anyDirty = false;
+
+            for (int c = 0; c < giCascades; c++) {
+            	int vs = giVoxelSizeArr[c];
+            	int half = giDim * vs / 2;
+            	int maxY = std::max(0, worldHeight - giDim * vs);
+
+            	giWant[c] = glm::ivec3(floorDiv(px - half, vs) * vs, std::clamp(py - half, 0, maxY), floorDiv(pz - half, vs) * vs);
+
+            	dirty[c] = giDirty || std::abs(giWant[c].x - giOrigin[c].x) >= vs * 16 || std::abs(giWant[c].y - giOrigin[c].y) >= vs * 16 || std::abs(giWant[c].z - giOrigin[c].z) >= vs * 16;
+            	if (dirty[c]) anyDirty = true;
+            }
+            
+            if (anyDirty) {
+            	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
+    			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, giVoxelSsbo);
+    			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, giBaseSsbo);
+    			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, giLightA);
+    			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, giLightB);
+
+    			glUseProgram(computeProgram);
+
+    			glUniform3f(giSunDirLoc, sunDir.x, sunDir.y, sunDir.z);
+
+    			for (int c = 0; c < giCascades; c++) {
+    				if (!dirty[c]) continue;
+
+    				giOrigin[c] = giWant[c];
+
+    				giBuildVoxelTypes(chunks, giOrigin[c], (int)giVoxelSizeArr[c], giVoxelTypes);
+
+    				glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
+
+    				glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, voxelBytes, giVoxelTypes.data());
+
+    				glUniform1i(giCascadeLoc, c);
+    				glUniform1i(giStageLoc, 0);
+
+    				glDispatchCompute(16, 16, 16);
+
+    				glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    				for (int iteration = 0; iteration < 3; iteration++) {
+    					glUniform1i(giStageLoc, 1);
+    					glUniform1i(giReadALoc, iteration % 2 == 0 ? 1 : 0);
+
+    					glDispatchCompute(16, 16, 16);
+
+    					glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    				}
+
+    				glUniform1i(giStageLoc, 2);
+
+    				glDispatchCompute(16, 16, 16);
+
+    				glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    			}
+
+    			glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+    			glUseProgram(shaderProgram);
+
+    			glUniform3iv(giOriginsLoc, giCascades, (const GLint*)giOrigin);
+
+    			glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
+
+            	giDirty = false;
+            }
+        }
 
 		glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
 		glViewport(0, 0, pastWidth, pastHeight);
@@ -3227,50 +3413,6 @@ int main() {
 		glBindVertexArray(0);
 
 		accumIdx = 1 - accumIdx;
-
-		if (lightingMode == 1) {
-            const int px = (int)std::floor(camPos.x);
-            const int py = (int)std::floor(camPos.y);
-            const int pz = (int)std::floor(camPos.z);
-
-            glm::ivec3 giWant[giCascades];
-
-            bool dirty[giCascades];
-            bool anyDirty = false;
-
-            for (int c = 0; c < giCascades; c++) {
-            	int vs = giVoxelSizeArr[c];
-            	int half = giDim * vs / 2;
-            	int maxY = std::max(0, worldHeight - giDim * vs);
-
-            	giWant[c] = glm::ivec3(floorDiv(px - half, vs) * vs, std::clamp(py - half, 0, maxY), floorDiv(pz - half, vs) * vs);
-
-            	dirty[c] = giDirty || std::abs(giWant[c].x - giOrigin[c].x) >= vs * 16 || std::abs(giWant[c].y - giOrigin[c].y) >= vs * 16 || std::abs(giWant[c].z - giOrigin[c].z) >= vs * 16;
-            	if (dirty[c]) anyDirty = true;
-            }
-            
-            if (anyDirty) {
-            	glBindBuffer(GL_SHADER_STORAGE_BUFFER, giSsbo);
-
-            	for (int c = 0; c < giCascades; c++) {
-            		if (!dirty[c]) continue;
-
-            		giOrigin[c] = giWant[c];
-
-            		giFillAndLight(chunks, giOrigin[c], giVoxelSizeArr[c], sunDir, giCpu);
-
-            		glBufferSubData(GL_SHADER_STORAGE_BUFFER, c * giVoxelsPerCascade * sizeof(uint32_t), giCpu.size() * sizeof(uint32_t), giCpu.data());
-            	}
-
-            	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-
-            	glUniform3iv(giOriginsLoc, giCascades, (const GLint*)giOrigin);
-
-            	glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
-
-            	giDirty = false;
-            }
-        }
 
 		if (lightingMode == 1) {
 			GLboolean aeDepthWas = glIsEnabled(GL_DEPTH_TEST);
