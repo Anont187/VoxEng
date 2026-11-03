@@ -114,6 +114,8 @@ void main() {
 
         	vec3 sunColor = mix(vec3(1.00, 0.50, 0.20), vec3(1.00, 0.95, 0.85), smoothstep(0.0, 0.4, sunHeight));
 
+        	float dayAmount = smoothstep(-0.15, 0.25, uSunDir.y);
+
         	// here comes le shadows
 
         	bool shadowed = false;
@@ -130,8 +132,8 @@ void main() {
         		}
         	}
 
-        	vec3 skyAmb = vec3(0.45, 0.55, 0.70);
-			vec3 grdAmb = vec3(0.20, 0.15, 0.10);
+        	vec3 skyAmb = mix(vec3(0.01, 0.01, 0.05), vec3(0.45, 0.55, 0.70), dayAmount);
+			vec3 grdAmb = mix(vec3(0.005, 0.005, 0.01), vec3(0.20, 0.15, 0.10), dayAmount);
 			vec3 ambient = mix(grdAmb, skyAmb, n.y * 0.5 + 0.5);
 
 			float shadowFactor = shadowed ? 0.10 : 1.0;

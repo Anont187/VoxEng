@@ -954,8 +954,10 @@ void main() {
 		bool shadowed = false;
 		if (ndotl > 0.05 && sunAmount > 0.05 && viewDist < 96.0) shadowed = rmDda(rayOrigin, sunDir, shadowMaxDist, sn, sp);
 
-		vec3 skyAmb = vec3(0.45, 0.55, 0.70);
-		vec3 grdAmb = vec3(0.20, 0.15, 0.10);
+		float dayAmount = smoothstep(-0.15, 0.25, sunDir.y);
+        
+        vec3 skyAmb = mix(vec3(0.005, 0.01, 0.02), vec3(0.45, 0.55, 0.70), dayAmount);
+        vec3 grdAmb = mix(vec3(0.001, 0.002, 0.005), vec3(0.20, 0.15, 0.10), dayAmount);
 		vec3 ambient = mix(grdAmb, skyAmb, normal.y * 0.5 + 0.5);
 
 		float shadowFactor = shadowed ? uShadowFactor : 1.0;
@@ -963,13 +965,10 @@ void main() {
 		vec3 direct = ambient + sunColor * ndotl * sunAmount * shadowFactor;
 		vec3 indirect = vec3(0.0);
 
-		bool wantGi = shadowed || normal.y < 0.9;
-		if (wantGi) {
-			if (viewDist < 128.0) {
-				indirect = giSample(vWorldPos + normal * 1.25) * uGiStrength;
-			} else {
-				indirect = vec3(0.15, 0.18, 0.22) * sunAmount * uGiStrength;
-			}
+		if (viewDist < 128.0) {
+			indirect = giSample(vWorldPos + normal * 1.25) * uGiStrength;
+		} else {
+			indirect = vec3(0.15, 0.18, 0.22) * sunAmount * uGiStrength;
 		}
 
 		color = texColor * (direct + indirect);
