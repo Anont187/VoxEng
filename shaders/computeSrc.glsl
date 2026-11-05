@@ -59,13 +59,24 @@ bool solidAt(ivec3 p) {
 	return voxelType[voxelIndex(p)] != 0u;
 }
 
-vec3 albedoFor(uint type) {
-	if (type == 1u) return vec3(107.0, 107.0, 112.0) / 255.0;
-	if (type == 2u) return vec3(115.0, 82.0, 51.0) / 255.0;
-	if (type == 3u) return vec3(77.0, 133.0, 51.0) / 255.0;
-	if (type == 4u) return vec3(235.0, 240.0, 247.0) / 255.0;
+vec3 srgbToLinear(vec3 c) {
+	bvec3 cutoff = lessThanEqual(c, vec3(0.04045));
 
-	return vec3(0.0);
+	vec3 low = c / 12.92;
+	vec3 high = pow((c + 0.055) / 1.055, vec3(2.4));
+
+	return mix(high, low, cutoff);
+}
+
+vec3 albedoFor(uint type) {
+	vec3 srgb = vec3(0.0);
+
+	if (type == 1u) srgb = vec3(107.0, 107.0, 112.0) / 255.0;
+	if (type == 2u) srgb = vec3(115.0, 82.0, 51.0) / 255.0;
+	if (type == 3u) srgb = vec3(77.0, 133.0, 51.0) / 255.0;
+	if (type == 4u) srgb = vec3(235.0, 240.0, 247.0) / 255.0;
+
+	return srgbToLinear(srgb);
 }
 
 vec3 previousLight(uint i) {
@@ -138,7 +149,9 @@ void main() {
 
 			float shadowFactor = shadowed ? 0.10 : 1.0;
 
-			directAndAmbient = albedo * (ambient + sunColor * ndl * day * shadowFactor);
+			vec3 directLight = sunColor * ndl * day * shadowFactor;
+
+			directAndAmbient = albedo * directLight;
         }
 
         giBase[i] = vec4(directAndAmbient, 0.0);
@@ -150,21 +163,32 @@ void main() {
 	// stage 1 indirect light propagation
 
 	if (uStage == 1) {
-		vec3 sum = vec3(0.0);
-		if (p.x > 0) 	   sum += previousLight(i - 1u);
-		if (p.x < nGi - 1) sum += previousLight(i + 1u);
-		if (p.y > 0) 	   sum += previousLight(i - uint(nGi));
-		if (p.y < nGi - 1) sum += previousLight(i + uint(nGi));
-		if (p.z > 0) 	   sum += previousLight(i - uint(nGi * nGi));
-		if (p.z < nGi - 1) sum += previousLight(i + uint(nGi * nGi));
+		const ivec3 dirs[6] = ivec3[6](ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0), ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1));
 
-		sum *= (1.0 / 6.0);
+		vec3 sum = vec3(0.0);
+
+		int openCount = 0;
+
+		for (int d = 0; d < 6; ++d) {
+			ivec3 q = p + dirs[d];
+
+			if (!insideGrid(q)) continue;
+			if (type == 0u) {
+				sum += previousLight(voxelIndex(q));
+			} else if (!solidAt(q)) {
+				sum += previousLight(voxelIndex(q));
+
+				openCount++;
+			}
+		}
 
 		vec3 result;
 		if (type != 0u) {
-			result = giBase[i].rgb + albedoFor(type) * sum * 0.55;
+			vec3 incoming = (openCount > 0) ? sum / float(openCount) : vec3(0.0);
+
+			result = giBase[i].rgb + albedoFor(type) * incoming * 0.55;
 		} else {
-			result = sum;
+			result = sum * (1.0 / 6.0);
 		}
 
 		if (uReadA != 0) {

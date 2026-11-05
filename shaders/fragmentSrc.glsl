@@ -72,6 +72,9 @@ uniform float uExposureBias;
 uniform int uGiDebug;
 uniform ivec3 giOrigins[3];
 uniform float giVoxelSizes[3];
+uniform float uAutoExposureFloor;
+uniform float uExposureMin;
+uniform float uExposureMax;
 
 const int brickSize = 8;
 
@@ -650,7 +653,7 @@ void main() {
 		float topLod = float(textureQueryLevels(uLumTex)) - 1.0;
 	    float logAvg = textureLod(uLumTex, vec2(0.5), topLod).r;
 	    float avgLum = exp2(logAvg);
-	    float exposureTarget = clamp(uExposureKey / max(avgLum, 1e-4) * uExposureBias, 0.1, 4.0);
+	    float exposureTarget = clamp(uExposureKey / max(avgLum, uAutoExposureFloor) * uExposureBias, uExposureMin, uExposureMax);
 	    float prev = texelFetch(uExposureTex, ivec2(0), 0).r;
 
 	    fragColor = vec4(mix(prev, exposureTarget, uAdaptFactor), 0.0, 0.0, 1.0);
@@ -663,7 +666,7 @@ void main() {
 
 		float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
 
-		fragColor = vec4(log2(max(l, 1e-4)), 0.0, 0.0, 1.0);
+		fragColor = vec4(log2(max(l, uAutoExposureFloor)), 0.0, 0.0, 1.0);
 
 		return;
 	}
@@ -826,7 +829,7 @@ void main() {
 		    vec3 hn, hp;
 
 		    if (rmDda(ro, rd, 256.0, hn, hp)) {
-		        fragColor = vec4(giSample(hp + hn * 0.75) * 4.0, 1.0);
+		        fragColor = vec4(pow(clamp(giSample(hp + hn * 0.75) * 2.0, 0.0, 1.0), vec3(0.5)), 1.0);
 		    } else {
 		        fragColor = vec4(0.0);
 		    }

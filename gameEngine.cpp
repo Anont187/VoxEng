@@ -115,7 +115,18 @@ bool isGrounded = false;
 bool suppressJump = false;
 bool chunksNeedUpdate = true;
 
+int giSunNext = 0;
+
+float giSunCooldown = 0.0f;
+float giSunBakeInterval = 2.0f;
+float giSunStepDeg = 2.0f;
+
 glm::vec3 flyVelocity(0.0f);
+glm::vec3 giBakedSunDir[giCascades] = {
+	glm::vec3(0.0f, 1.0f, 0.0f), 
+	glm::vec3(0.0f, 1.0f, 0.0f),
+	glm::vec3(0.0f, 1.0f, 0.0f)
+};
 
 struct drawElementsCommand {
 	GLuint count;
@@ -1826,6 +1837,8 @@ int main() {
     flyAcceleration = setting("flyAcceleration", flyAcceleration);
     flyDrag = setting("flyDrag", flyDrag);
     flyMaxSpeed = setting("flyMaxSpeed", flyMaxSpeed);
+    giSunBakeInterval = setting("giSunBakeInterval", giSunBakeInterval);
+    giSunStepDeg = setting("giSunStepDeg", giSunStepDeg);
 
 	if (!glfwInit()) {
 		std::cout << "ERROR: cannot initialize GLFW.";
@@ -2406,6 +2419,9 @@ int main() {
     GLint aeAdaptLoc = glGetUniformLocation(shaderProgram, "uAdaptFactor");
     GLint giOriginsLoc = glGetUniformLocation(shaderProgram, "giOrigins");
     GLint giVoxelSizesLoc = glGetUniformLocation(shaderProgram, "giVoxelSizes");
+    GLint aeFloorLoc = glGetUniformLocation(shaderProgram, "uAutoExposureFloor");
+    GLint exposureMinLoc = glGetUniformLocation(shaderProgram, "uExposureMin");
+    GLint exposureMaxLoc = glGetUniformLocation(shaderProgram, "uExposureMax");
 
     std::cout << "STARTUP: Made LOOKUP locations for glUniform\n" << std::flush;
 
@@ -2794,7 +2810,7 @@ int main() {
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     std::vector<uint32_t> giCpu;
-    std::vector<uint32_t> giVoxelTypes(giVoxelsPerCascade);
+    std::vector<std::vector<uint32_t>> giVoxelCache(giCascades, std::vector<uint32_t>(giVoxelsPerCascade));
 
     glm::ivec3 giOrigin[giCascades] = {
     	glm::ivec3(0),
@@ -2813,6 +2829,10 @@ int main() {
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svoSsbo);
 
    	glUniform1i(glGetUniformLocation(shaderProgram, "uGiDebug"), (int)setting("giDebug", 0.0f));
+
+   	glUniform1f(aeFloorLoc, setting("aeFloor", 0.01f));
+   	glUniform1f(exposureMinLoc, setting("exposureMin", 0.1f));
+   	glUniform1f(exposureMaxLoc, setting("exposureMax", 1.0f));
 
 	std::cout << "STARTUP: EOF\n" << std::flush;
 
@@ -2993,6 +3013,9 @@ int main() {
 			playerChunkZ = newChunkZ;
 
 		    rebuildChunks();
+
+		    giDirty = true;
+
 		    uploadVoxelTbo();
 		    uploadBrickTbo();
 
@@ -3047,6 +3070,22 @@ int main() {
 
             bool dirty[giCascades];
             bool anyDirty = false;
+            bool originMoved[giCascades];
+
+            giSunCooldown -= deltaTime;
+
+			int sunCascade = -1;
+
+			if (!giDirty && giSunCooldown <= 0.0f) {
+			    const float giStepCos = std::cos(glm::radians(giSunStepDeg));
+
+			    for (int k = 0; k < giCascades && sunCascade < 0; k++) {
+			        const int c = (giSunNext + k) % giCascades;
+			        const bool relevant = sunDir.y > -0.1f || giBakedSunDir[c].y > -0.1f;
+
+			        if (relevant && glm::dot(sunDir, giBakedSunDir[c]) < giStepCos) sunCascade = c;
+			    }
+			}
 
             for (int c = 0; c < giCascades; c++) {
             	int vs = giVoxelSizeArr[c];
@@ -3055,7 +3094,8 @@ int main() {
 
             	giWant[c] = glm::ivec3(floorDiv(px - half, vs) * vs, std::clamp(py - half, 0, maxY), floorDiv(pz - half, vs) * vs);
 
-            	dirty[c] = giDirty || std::abs(giWant[c].x - giOrigin[c].x) >= vs * 16 || std::abs(giWant[c].y - giOrigin[c].y) >= vs * 16 || std::abs(giWant[c].z - giOrigin[c].z) >= vs * 16;
+            	originMoved[c] = std::abs(giWant[c].x - giOrigin[c].x) >= vs * 16 || std::abs(giWant[c].y - giOrigin[c].y) >= vs * 16 || std::abs(giWant[c].z - giOrigin[c].z) >= vs * 16;
+				dirty[c] = giDirty || originMoved[c] || (c == sunCascade);
             	if (dirty[c]) anyDirty = true;
             }
             
@@ -3073,13 +3113,16 @@ int main() {
     			for (int c = 0; c < giCascades; c++) {
     				if (!dirty[c]) continue;
 
-    				giOrigin[c] = giWant[c];
+    				giBakedSunDir[c] = sunDir;
 
-    				giBuildVoxelTypes(chunks, giOrigin[c], (int)giVoxelSizeArr[c], giVoxelTypes);
+    				if (giDirty || originMoved[c]) {
+    					giOrigin[c] = giWant[c];
+    					giBuildVoxelTypes(chunks, giOrigin[c], (int)giVoxelSizeArr[c], giVoxelCache[c]);
+    				}
 
     				glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
 
-    				glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, voxelBytes, giVoxelTypes.data());
+    				glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, voxelBytes, giVoxelCache[c].data());
 
     				glUniform1i(giCascadeLoc, c);
     				glUniform1i(giStageLoc, 0);
@@ -3113,6 +3156,11 @@ int main() {
     			glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
 
             	giDirty = false;
+
+            	if (sunCascade >= 0) {
+            		giSunCooldown = giSunBakeInterval;
+            		giSunNext = (sunCascade + 1) % giCascades;
+            	}
             }
         }
 
