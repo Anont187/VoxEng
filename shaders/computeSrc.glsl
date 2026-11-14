@@ -19,32 +19,19 @@ layout(std430, binding = 3) readonly buffer voxelInputBuffer {
 	uint voxelType[];
 };
 
-// original direct plus ambient lighting yes
+// 1 pass rcgi woo
 
-layout(std430, binding = 4) buffer giBaseBuffer {
-	vec4 giBase[];
+layout(std430, binding = 4) buffer giHistoryBuffer {
+	vec4 giHistory[];
 };
 
-// whats ping pong, its a buffer here, for biding 5 and 6
+// some uniforms
 
-layout(std430, binding = 5) buffer giLightBufferA {
-	vec4 giLightA[];
-};
-
-layout(std430, binding = 6) buffer giLightBufferB {
-	vec4 giLightB[];
-};
-
-// hmm, 0 = direct lighting, 1 = a (singular) gi propagation iteration, and 2 is pack final lighting
-
-uniform int uStage;
-
-// propagation is 1 = read a and write b, 2 is write a and read b
-
-uniform int uReadA;
 uniform int uCascadeIndex;
 uniform vec3 uSunDir;
-uniform int uPackFromA;
+uniform int uFrameIndex;
+uniform ivec3 giOrigins[3];
+uniform float giVoxelSizes[3];
 
 uint voxelIndex(ivec3 p) {
 	return uint((p.z * nGi + p.y) * nGi + p.x);
@@ -54,167 +41,97 @@ bool insideGrid(ivec3 p) {
 	return all(greaterThanEqual(p, ivec3(0))) && all(lessThan(p, ivec3(nGi)));
 }
 
-bool solidAt(ivec3 p) {
-	if (!insideGrid(p)) return false;
-
-	return voxelType[voxelIndex(p)] != 0u;
-}
-
-vec3 srgbToLinear(vec3 c) {
-	bvec3 cutoff = lessThanEqual(c, vec3(0.04045));
-
-	vec3 low = c / 12.92;
-	vec3 high = pow((c + 0.055) / 1.055, vec3(2.4));
-
-	return mix(high, low, cutoff);
-}
-
 vec3 albedoFor(uint type) {
-	vec3 srgb = vec3(0.0);
+	if (type == 1u) return vec3(0.15, 0.15, 0.17);
+	if (type == 2u) return vec3(0.17, 0.08, 0.03);
+	if (type == 3u) return vec3(0.07, 0.23, 0.03);
+	if (type == 4u) return vec3(0.83, 0.87, 0.93);
 
-	if (type == 1u) srgb = vec3(107.0, 107.0, 112.0) / 255.0;
-	if (type == 2u) srgb = vec3(115.0, 82.0, 51.0) / 255.0;
-	if (type == 3u) srgb = vec3(77.0, 133.0, 51.0) / 255.0;
-	if (type == 4u) srgb = vec3(235.0, 240.0, 247.0) / 255.0;
-
-	return srgbToLinear(srgb);
+	return vec3(0.0);
 }
 
-vec3 previousLight(uint i) {
-	return (uReadA != 0) ? giLightA[i].rgb : giLightB[i].rgb;
+vec3 getRayDir(int r, float jitter) {
+	float a = float(r) * 1.04719755 + jitter;
+	float z = (float(r) + 0.5) / 3.0 - 1.0;
+	float rad = sqrt(max(0.0, 1.0 - z * z));
+
+	return vec3(cos(a) * rad, z, sin(a) * rad);
+}
+
+vec3 sampleUpperCascade(int upperC, vec3 wp) {
+	vec3 p = clamp((wp - vec3(giOrigins[upperC])) / giVoxelSizes[upperC], vec3(0.0), vec3(63.0));
+
+	uint idx = uint(upperC) * giVoxels + voxelIndex(ivec3(floor(p)));
+
+	return unpackUnorm4x8(giOutput[idx]).rgb;
 }
 
 void main() {
 	ivec3 p = ivec3(gl_GlobalInvocationID.xyz);
 	if (!insideGrid(p)) return;
 
-	uint i = voxelIndex(p);
-	uint type = voxelType[i];
+	// no more stages, 1 pass
 
-	// this has 3 stages, 0, 1, 2, this is stage 0
+	uint localIdx = voxelIndex(p);
+	uint cOffset = uint(uCascadeIndex) * giVoxels;
+	uint gIdx = cOffset + localIdx;
 
-	if (uStage == 0) {
-		if (type == 0u) {
-			giBase[i] = vec4(0.0);
-			giLightA[i] = vec4(0.0);
+	float tStart = (uCascadeIndex == 0) ? 0.6 : (uCascadeIndex == 1) ? 4.0 : 10.0;
+	float tEnd = (uCascadeIndex == 0) ? 4.0 : (uCascadeIndex == 1) ? 10.0 : 20.0;
+	float dt = (tEnd - tStart) * 0.25;
+	float jitter = fract(float(uFrameIndex) * 0.6180339 + float(localIdx) * 0.073) * 6.2831853;
 
-			return;
-		}
+	vec3 probeLocal = vec3(p) + 0.5;
+	vec3 probeWorld = vec3(giOrigins[uCascadeIndex]) + probeLocal * giVoxelSizes[uCascadeIndex];
 
-		vec3 albedo = albedoFor(type);
-		vec3 n = vec3(0.0);
+	float day = smoothstep(-0.1, 0.3, uSunDir.y);
 
-		// too many !solidAt, i dont know why dont ask me
+    vec3 sunCol = mix(vec3(1.0, 0.50, 0.20), vec3(1.0, 0.95, 0.85), smoothstep(0.0, 0.4, uSunDir.y));
+    vec3 skyCol = mix(vec3(0.01, 0.01, 0.04), vec3(0.45, 0.55, 0.70), day);
+    vec3 rad = vec3(0.0);
 
-		if (!solidAt(p + ivec3( 1, 0, 0))) n.x += 1.0;
-        if (!solidAt(p + ivec3(-1, 0, 0))) n.x -= 1.0;
+    for (int r = 0; r < 6; ++r) {
+    	vec3 rd = getRayDir(r, jitter);
 
-        if (!solidAt(p + ivec3(0,  1, 0))) n.y += 1.0;
-        if (!solidAt(p + ivec3(0, -1, 0))) n.y -= 1.0;
+    	bool hit = false;
 
-        if (!solidAt(p + ivec3(0, 0,  1))) n.z += 1.0;
-        if (!solidAt(p + ivec3(0, 0, -1))) n.z -= 1.0;
+    	uint hitType = 0u;
 
-        vec3 directAndAmbient = vec3(0.0);
+    	ivec3 hitVox = p;
 
-        if (dot(n, n) >= 1e-6) {
-        	n = normalize(n);
+    	for (int s = 0; s < 4; ++s) {
+    		ivec3 q = ivec3(floor(probeLocal + rd * (tStart + (float(s) + 0.5) * dt)));
+    		if (!insideGrid(q)) break;
 
-        	float ndl = max(dot(n, normalize(uSunDir)), 0.0);
-        	float sunHeight = uSunDir.y;
-        	float day = smoothstep(-0.1, 0.3, sunHeight);
+    		uint vt = voxelType[cOffset + voxelIndex(q)];
+    		if (vt != 0u) {
+    			hit = true;
+    			hitType = vt;
+    			hitVox = q;
 
-        	vec3 sunColor = mix(vec3(1.00, 0.50, 0.20), vec3(1.00, 0.95, 0.85), smoothstep(0.0, 0.4, sunHeight));
+    			break;
+    		}
+    	}
 
-        	float dayAmount = smoothstep(-0.15, 0.25, uSunDir.y);
+    	if (hit) {
+    		vec3 albedo = albedoFor(hitType);
 
-        	// here comes le shadows
+    		bool sh = insideGrid(hitVox + ivec3(round(uSunDir * 3.0))) && voxelType[cOffset + voxelIndex(hitVox + ivec3(round(uSunDir * 3.0)))] != 0u;
 
-        	bool shadowed = false;
+    		vec3 direct = albedo * sunCol * day * (sh ? 0.10 : 1.0);
+    		vec3 bounce = albedo * giHistory[cOffset + voxelIndex(hitVox)].rgb * 0.45;
 
-        	if (ndl > 0.0) {
-        		int shadowStep = 1 << uCascadeIndex;
-        		int shadowSteps = max(1, (12 + shadowStep - 1) / shadowStep);
-        		for (int s = 1; s <= shadowSteps; ++s) {
-        			ivec3 q = p + ivec3(round(uSunDir * float(s)));
-        			if (!insideGrid(q)) break;
-        			if (solidAt(q)) {
-        				shadowed = true;
+    		rad += direct + bounce;
+    	} else if (uCascadeIndex < 2) {
+    		rad += sampleUpperCascade(uCascadeIndex + 1, probeWorld + rd * (tEnd * giVoxelSizes[uCascadeIndex]));
+    	} else {
+    		rad += skyCol * (rd.y * 0.4 + 0.6);
+    	}
+    }
 
-        				break;
-        			}
-        		}
-        	}
+    vec3 blended = mix(giHistory[gIdx].rgb, rad / 6.0, 0.20);
 
-        	vec3 skyAmb = mix(vec3(0.01, 0.01, 0.05), vec3(0.45, 0.55, 0.70), dayAmount);
-			vec3 grdAmb = mix(vec3(0.005, 0.005, 0.01), vec3(0.20, 0.15, 0.10), dayAmount);
-			vec3 ambient = mix(grdAmb, skyAmb, n.y * 0.5 + 0.5);
+    giHistory[gIdx] = vec4(blended, 1.0);
 
-			float shadowFactor = shadowed ? 0.10 : 1.0;
-
-			vec3 directLight = sunColor * ndl * day * shadowFactor;
-
-			directAndAmbient = albedo * directLight;
-        }
-
-        giBase[i] = vec4(directAndAmbient, 0.0);
-        giLightA[i] = vec4(directAndAmbient, 0.0);
-
-        return;
-	}
-
-	// stage 1 indirect light propagation
-
-	if (uStage == 1) {
-		const ivec3 dirs[6] = ivec3[6](ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0), ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1));
-
-		vec3 sum = vec3(0.0);
-
-		int openCount = 0;
-
-		for (int d = 0; d < 6; ++d) {
-			ivec3 q = p + dirs[d];
-
-			if (!insideGrid(q)) continue;
-			if (type == 0u) {
-				sum += previousLight(voxelIndex(q));
-			} else if (!solidAt(q)) {
-				sum += previousLight(voxelIndex(q));
-
-				openCount++;
-			}
-		}
-
-		vec3 result;
-		if (type != 0u) {
-			vec3 incoming = (openCount > 0) ? sum / float(openCount) : vec3(0.0);
-
-			result = giBase[i].rgb + albedoFor(type) * incoming * 0.55;
-		} else {
-			result = sum * (1.0 / 6.0);
-		}
-
-		if (uReadA != 0) {
-			giLightB[i] = vec4(result, 0.0);
-		} else {
-			giLightA[i] = vec4(result, 0.0);
-		}
-
-		return;
-	}
-
-	// stage 2..? pack final gi into exist ouput
-
-	if (uStage == 2) {
-		vec3 src = (uPackFromA != 0) ? giLightA[i].rgb : giLightB[i].rgb;
-		vec3 c = clamp(src, vec3(0.0), vec3(1.0));
-
-		uint r = uint(c.r * 255.0);
-		uint g = uint(c.g * 255.0);
-		uint b = uint(c.b * 255.0);
-		uint packed1 = r | (g << 8u) | (b << 16u) | (255u << 24u);
-		uint outputIndex  = uint(uCascadeIndex) * giVoxels + i;
-
-		giOutput[outputIndex] = packed1;
-	}
+    giOutput[gIdx] = packUnorm4x8(vec4(clamp(blended, 0.0, 1.0), 1.0));
 }

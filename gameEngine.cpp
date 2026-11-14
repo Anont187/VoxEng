@@ -2429,7 +2429,8 @@ int main() {
 	GLint giReadALoc = glGetUniformLocation(computeProgram, "uReadA");
 	GLint giCascadeLoc = glGetUniformLocation(computeProgram, "uCascadeIndex");
 	GLint giSunDirLoc = glGetUniformLocation(computeProgram, "uSunDir");
-	    GLint giPackFromALoc = glGetUniformLocation(computeProgram, "uPackFromA");
+	GLint giPackFromALoc = glGetUniformLocation(computeProgram, "uPackFromA");
+	GLint frameIndexLoc = glGetUniformLocation(computeProgram, "uFrameIndex");
 
     std::cout << "STARTUP: Made Compute LOOKUP Locations.\n" << std::flush;
 
@@ -2791,10 +2792,10 @@ int main() {
     glBufferData(GL_SHADER_STORAGE_BUFFER, giCascades * giVoxelsPerCascade * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
-	glBufferData(GL_SHADER_STORAGE_BUFFER, voxelBytes, nullptr, GL_DYNAMIC_DRAW);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, giCascades * voxelBytes, nullptr, GL_DYNAMIC_DRAW);
 	
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, giBaseSsbo);
-	glBufferData(GL_SHADER_STORAGE_BUFFER, lightBytes, nullptr, GL_DYNAMIC_DRAW);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, giCascades * lightBytes, nullptr, GL_DYNAMIC_DRAW);
 	
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, giLightA);
 	glBufferData(GL_SHADER_STORAGE_BUFFER, lightBytes, nullptr, GL_DYNAMIC_DRAW);
@@ -3067,104 +3068,54 @@ int main() {
             const int py = (int)std::floor(camPos.y);
             const int pz = (int)std::floor(camPos.z);
 
-            glm::ivec3 giWant[giCascades];
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, giVoxelSsbo);
+            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, giBaseSsbo);
 
-            bool dirty[giCascades];
-            bool anyDirty = false;
-            bool originMoved[giCascades];
+            glUseProgram(computeProgram);
 
-            giSunCooldown -= deltaTime;
+            glUniform3f(giSunDirLoc, sunDir.x, sunDir.y, sunDir.z);
 
-			int sunCascade = -1;
-
-			if (!giDirty && giSunCooldown <= 0.0f) {
-			    const float giStepCos = std::cos(glm::radians(giSunStepDeg));
-
-			    for (int k = 0; k < giCascades && sunCascade < 0; k++) {
-			        const int c = (giSunNext + k) % giCascades;
-			        const bool relevant = sunDir.y > -0.1f || giBakedSunDir[c].y > -0.1f;
-
-			        if (relevant && glm::dot(sunDir, giBakedSunDir[c]) < giStepCos) sunCascade = c;
-			    }
-			}
+            glUniform1i(frameIndexLoc, accumFrame);
 
             for (int c = 0; c < giCascades; c++) {
-            	int vs = giVoxelSizeArr[c];
+            	int vs = (int)giVoxelSizeArr[c];
             	int half = giDim * vs / 2;
             	int maxY = std::max(0, worldHeight - giDim * vs);
 
-            	giWant[c] = glm::ivec3(floorDiv(px - half, vs) * vs, std::clamp(py - half, 0, maxY), floorDiv(pz - half, vs) * vs);
+            	glm::ivec3 want(floorDiv(px - half, vs) * vs, std::clamp(py - half, 0, maxY), floorDiv(pz - half, vs) * vs);
 
-            	originMoved[c] = std::abs(giWant[c].x - giOrigin[c].x) >= vs * 16 || std::abs(giWant[c].y - giOrigin[c].y) >= vs * 16 || std::abs(giWant[c].z - giOrigin[c].z) >= vs * 16;
-				dirty[c] = giDirty || originMoved[c] || (c == sunCascade);
-            	if (dirty[c]) anyDirty = true;
-            }
-            
-            if (anyDirty) {
-            	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
-    			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, giVoxelSsbo);
-    			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, giBaseSsbo);
-    			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, giLightA);
-    			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, giLightB);
+            	bool moved = std::abs(want.x - giOrigin[c].x) >= vs * 16 || std::abs(want.y - giOrigin[c].y) >= vs * 16 || std::abs(want.z - giOrigin[c].z) >= vs * 16;
+            	if (giDirty || moved) {
+            		giOrigin[c] = want;
 
-    			glUseProgram(computeProgram);
+            		giBuildVoxelTypes(chunks, giOrigin[c], vs, giVoxelCache[c]);
 
-    			glUniform3f(giSunDirLoc, sunDir.x, sunDir.y, sunDir.z);
-
-    			for (int c = 0; c < giCascades; c++) {
-    				if (!dirty[c]) continue;
-
-    				giBakedSunDir[c] = sunDir;
-
-    				if (giDirty || originMoved[c]) {
-    					giOrigin[c] = giWant[c];
-    					giBuildVoxelTypes(chunks, giOrigin[c], (int)giVoxelSizeArr[c], giVoxelCache[c]);
-    				}
-
-    				glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
-
-    				glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, voxelBytes, giVoxelCache[c].data());
-
-    				glUniform1i(giCascadeLoc, c);
-    				glUniform1i(giStageLoc, 0);
-
-    				glDispatchCompute(16, 16, 16);
-
-    				glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-
-    				const int bounceIters = std::max(1, 4 / (1 << c));
-    				for (int iteration = 0; iteration < bounceIters; iteration++) {
-    					glUniform1i(giStageLoc, 1);
-    					glUniform1i(giReadALoc, iteration % 2 == 0 ? 1 : 0);
-
-    					glDispatchCompute(16, 16, 16);
-
-    					glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-    				}
-
-    				glUniform1i(giStageLoc, 2);
-    				glUniform1i(giPackFromALoc, bounceIters % 2 == 0 ? 1 : 0);
-
-    				glDispatchCompute(16, 16, 16);
-
-    				glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-    			}
-
-    			glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-
-    			glUseProgram(shaderProgram);
-
-    			glUniform3iv(giOriginsLoc, giCascades, (const GLint*)giOrigin);
-
-    			glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
-
-            	giDirty = false;
-
-            	if (sunCascade >= 0) {
-            		giSunCooldown = giSunBakeInterval;
-            		giSunNext = (sunCascade + 1) % giCascades;
+            		glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
+            		glBufferSubData(GL_SHADER_STORAGE_BUFFER, c * voxelBytes, voxelBytes, giVoxelCache[c].data());
             	}
             }
+
+            giDirty = false;
+
+            glUniform3iv(giOriginsLoc, giCascades, (const GLint*)giOrigin);
+
+            glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
+
+            for (int c = giCascades - 1; c >= 0; c--) {
+            	glUniform1i(giCascadeLoc, c);
+
+            	glDispatchCompute(giDim / 4, giDim / 4, giDim / 4);
+            	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+            }
+
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+
+            glUseProgram(shaderProgram);
+
+            glUniform3iv(giOriginsLoc, giCascades, (const GLint*)giOrigin);
+
+            glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
         }
 
 		glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
