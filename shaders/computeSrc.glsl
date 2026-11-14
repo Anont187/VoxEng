@@ -44,6 +44,7 @@ uniform int uStage;
 uniform int uReadA;
 uniform int uCascadeIndex;
 uniform vec3 uSunDir;
+uniform int uPackFromA;
 
 uint voxelIndex(ivec3 p) {
 	return uint((p.z * nGi + p.y) * nGi + p.x);
@@ -132,7 +133,9 @@ void main() {
         	bool shadowed = false;
 
         	if (ndl > 0.0) {
-        		for (int s = 1; s <= 12; ++s) {
+        		int shadowStep = 1 << uCascadeIndex;
+        		int shadowSteps = max(1, (12 + shadowStep - 1) / shadowStep);
+        		for (int s = 1; s <= shadowSteps; ++s) {
         			ivec3 q = p + ivec3(round(uSunDir * float(s)));
         			if (!insideGrid(q)) break;
         			if (solidAt(q)) {
@@ -203,7 +206,8 @@ void main() {
 	// stage 2..? pack final gi into exist ouput
 
 	if (uStage == 2) {
-		vec3 c = clamp(giLightB[i].rgb, vec3(0.0), vec3(1.0));
+		vec3 src = (uPackFromA != 0) ? giLightA[i].rgb : giLightB[i].rgb;
+		vec3 c = clamp(src, vec3(0.0), vec3(1.0));
 
 		uint r = uint(c.r * 255.0);
 		uint g = uint(c.g * 255.0);

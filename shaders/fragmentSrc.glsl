@@ -597,23 +597,28 @@ float linearDepth(float d) {
 	return (2.0 * 0.1 * 800.0) / (800.0 + 0.1 - z * (800.0 - 0.1));
 }
 
+float giCoverage(int c, vec3 wp) {
+    vec3 p = (wp - vec3(giOrigins[c])) / max(giVoxelSizes[c], 1e-3);
+    vec3 e = min(p, 63.0 - p);
+
+    return smoothstep(0.0, 4.0, min(e.x, min(e.y, e.z)));
+}
+
 vec3 giSampleCascade(int c, vec3 wp) {
-	vec3 p = (wp - vec3(giOrigins[c])) / max(giVoxelSizes[c], 1e-3);
-	if (any(lessThan(p, vec3(0.0))) || any(greaterThan(p, vec3(63.0)))) return vec3(0.0);
+    vec3 p = clamp((wp - vec3(giOrigins[c])) / max(giVoxelSizes[c], 1e-3), vec3(0.0), vec3(63.0));
+    vec3 pf = floor(p);
 
-	vec3 pf = floor(p);
+    ivec3 b = ivec3(pf);
 
-	ivec3 b = ivec3(pf);
+    vec3 f = p - pf;
 
-	vec3 f = p - pf;
+    ivec3 c1 = min(b + ivec3(1), ivec3(63));
 
-	ivec3 c1 = min(b + ivec3(1), ivec3(63));
+    int base = c * 64 * 64 * 64;
 
-	int base = c * 64 * 64 * 64;
+    #define Lgt(x,y,z) unpackUnorm4x8(giVoxels[base + ((z) * 64 + (y)) * 64 + (x)]).rgb
 
-	#define Lgt(x,y,z) unpackUnorm4x8(giVoxels[base + ((z) * 64 + (y)) * 64 + (x)]).rgb
-
-	vec3 v000 = Lgt(b.x, b.y, b.z);
+    vec3 v000 = Lgt(b.x, b.y, b.z);
     vec3 v100 = Lgt(c1.x, b.y, b.z);
     vec3 v010 = Lgt(b.x, c1.y, b.z);
     vec3 v110 = Lgt(c1.x, c1.y, b.z);
@@ -628,22 +633,17 @@ vec3 giSampleCascade(int c, vec3 wp) {
 }
 
 vec3 giSample(vec3 wp) {
-	float d = length(wp - camPos);
-	if (d < 24.0) return giSampleCascade(0, wp);
-	if (d < 32.0) {
-		float t = smoothstep(24.0, 32.0, d);
-
-		return mix(giSampleCascade(0, wp), giSampleCascade(1, wp), t);
-	}
-
-	if (d < 56.0) return giSampleCascade(1, wp);
-	if (d < 72.0) {
-		float t = smoothstep(56.0, 72.0, d);
-
-		return mix(giSampleCascade(1, wp), giSampleCascade(2, wp), t);
-	}
-
-	return giSampleCascade(2, wp);
+    float d = length(wp - camPos);
+    
+    vec3 l2 = giSampleCascade(2, wp) * giCoverage(2, wp);
+    vec3 l1 = mix(giSampleCascade(1, wp), l2, 1.0 - giCoverage(1, wp));
+    vec3 l0 = mix(giSampleCascade(0, wp), l1, 1.0 - giCoverage(0, wp));
+    if (d < 24.0) return l0;
+    if (d < 32.0) return mix(l0, l1, smoothstep(24.0, 32.0, d));
+    if (d < 56.0) return l1;
+    if (d < 72.0) return mix(l1, l2, smoothstep(56.0, 72.0, d));
+    
+    return l2;
 }
 
 void main() {
@@ -945,36 +945,30 @@ void main() {
 
 		color = texColor * lighting;
 	} else {
-		vec3 rayOrigin = vWorldPos + normal * 0.05 + sunDir * 0.01;
-		vec3 sn, sp;
-
 		float viewDist = length(vWorldPos - camPos);
-		float sunHigh = clamp(sunDir.y, 0.0, 1.0);
-		float shadowMaxDist = mix(20.0, 8.0, sunHigh);
-
-		shadowMaxDist *= mix(1.0, 0.4, smoothstep(16.0, 96.0, viewDist));
-
-		bool shadowed = false;
-		if (ndotl > 0.05 && sunAmount > 0.05 && viewDist < 96.0) shadowed = rmDda(rayOrigin, sunDir, shadowMaxDist, sn, sp);
-
 		float dayAmount = smoothstep(-0.15, 0.25, sunDir.y);
         
+        float contactAo = 1.0;
+        if (viewDist < 48.0) {
+            contactAo = mix(0.45, 1.0, fragAo(vWorldPos, normal) / 3.0);
+        }
+
         vec3 skyAmb = mix(vec3(0.005, 0.01, 0.02), vec3(0.45, 0.55, 0.70), dayAmount);
         vec3 grdAmb = mix(vec3(0.001, 0.002, 0.005), vec3(0.20, 0.15, 0.10), dayAmount);
-		vec3 ambient = mix(grdAmb, skyAmb, normal.y * 0.5 + 0.5);
+		vec3 ambient = mix(grdAmb, skyAmb, normal.y * 0.5 + 0.5) * contactAo;
+		vec3 indirect = (viewDist < 96.0) ? giSample(vWorldPos + normal * 1.25) * uGiStrength : skyAmb * 0.25 * uGiStrength;
+        vec3 viewDir = normalize(camPos - vWorldPos);
+        vec3 halfVec = normalize(sunDir + viewDir);
 
-		float shadowFactor = shadowed ? uShadowFactor : 1.0;
+        float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 5.0);
+        float gloss = (vLayer == 3u) ? 0.45 : (vLayer == 2u) ? 0.18 : 0.06;
+        float specPower = (vLayer == 3u) ? 48.0 : 16.0;
+        float spec = pow(max(dot(normal, halfVec), 0.0), specPower) * gloss;
 
-		vec3 direct = ambient + sunColor * ndotl * sunAmount * shadowFactor;
-		vec3 indirect = vec3(0.0);
+        vec3 skyReflect = mix(grdAmb, skyAmb, reflect(-viewDir, normal).y * 0.5 + 0.5);
+        vec3 direct = sunColor * (ndotl + spec) * sunAmount * contactAo;
 
-		if (viewDist < 128.0) {
-			indirect = giSample(vWorldPos + normal * 1.25) * uGiStrength;
-		} else {
-			indirect = vec3(0.15, 0.18, 0.22) * sunAmount * uGiStrength;
-		}
-
-		color = texColor * (direct + indirect);
+		color = texColor * (ambient + direct + indirect) + (skyReflect * fresnel * gloss * sunAmount);
 	}
 
 	if (vFace == 6u) {

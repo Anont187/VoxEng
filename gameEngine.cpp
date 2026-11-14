@@ -2429,6 +2429,7 @@ int main() {
 	GLint giReadALoc = glGetUniformLocation(computeProgram, "uReadA");
 	GLint giCascadeLoc = glGetUniformLocation(computeProgram, "uCascadeIndex");
 	GLint giSunDirLoc = glGetUniformLocation(computeProgram, "uSunDir");
+	    GLint giPackFromALoc = glGetUniformLocation(computeProgram, "uPackFromA");
 
     std::cout << "STARTUP: Made Compute LOOKUP Locations.\n" << std::flush;
 
@@ -3131,7 +3132,8 @@ int main() {
 
     				glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-    				for (int iteration = 0; iteration < 3; iteration++) {
+    				const int bounceIters = std::max(1, 4 / (1 << c));
+    				for (int iteration = 0; iteration < bounceIters; iteration++) {
     					glUniform1i(giStageLoc, 1);
     					glUniform1i(giReadALoc, iteration % 2 == 0 ? 1 : 0);
 
@@ -3141,6 +3143,7 @@ int main() {
     				}
 
     				glUniform1i(giStageLoc, 2);
+    				glUniform1i(giPackFromALoc, bounceIters % 2 == 0 ? 1 : 0);
 
     				glDispatchCompute(16, 16, 16);
 
