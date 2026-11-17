@@ -183,9 +183,11 @@ human-readable attribution notice and clickable hyperlink pointing back to
 the original source repository.
 
 The notice must be clearly visible to the end-user or audience within the 
-primary credits, interface, or public description text, and must read 
-substantially as follows:
-"Powered by VoxEng - https://github.com"
+primary credits, interface, or public description text, and must be clearly read 
+substantially as follows (Please note that on the following example, this format
+or placeholder with text inside is just a placeholder: { } ):
+"Powered by {Project Name} - https://github.com/Anont187/{Project Name}"
+- Please also note that {Project Name} is indeed this Project's Name.
 
 2. LINKING METHODS:
 This attribution, source availability, and linking requirement applies 
