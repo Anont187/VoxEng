@@ -76,14 +76,15 @@ constexpr int brickSize = 8;
 constexpr int brickDimX = (chunkSize * (renderRadius * 2 + 1)) / brickSize;
 constexpr int brickDimY = worldHeight / brickSize;
 constexpr int brickDimZ = brickDimX;
-constexpr int giDim = 64;
-constexpr int giCascades = 3;
-constexpr int giVoxelsPerCascade = giDim * giDim * giDim;
-constexpr int cascadeDims[3] = { giDim, giDim, giDim };
-constexpr int cascadeRays[3] = { 4, 8, 16 };
-constexpr int cascadeVoxels[3] = { 32 * 32 * 32, 16 * 16 * 16, 8 * 8 * 8 };
-constexpr int cascadeOffsets[3] = { 0, 32768, 36864 };
-constexpr int totalGiVoxels = giCascades * giVoxelsPerCascade;
+
+int giDim = 64;
+int giCascades = 3;
+int giVoxelsPerCascade = giDim * giDim * giDim;
+int cascadeDims[3] = { giDim, giDim, giDim };
+int cascadeRays[3] = { 4, 8, 16 };
+int cascadeVoxels[3] = { 32 * 32 * 32, 16 * 16 * 16, 8 * 8 * 8 };
+int cascadeOffsets[3] = { 0, 32768, 36864 };
+int totalGiVoxels = giCascades * giVoxelsPerCascade;
 
 bool giDirty = true;
 
@@ -127,7 +128,7 @@ float giSunBakeInterval = 2.0f;
 float giSunStepDeg = 2.0f;
 
 glm::vec3 flyVelocity(0.0f);
-glm::vec3 giBakedSunDir[giCascades] = {
+glm::vec3 giBakedSunDir[3] = {
 	glm::vec3(0.0f, 1.0f, 0.0f), 
 	glm::vec3(0.0f, 1.0f, 0.0f),
 	glm::vec3(0.0f, 1.0f, 0.0f)
@@ -1840,6 +1841,15 @@ int main() {
     flyMaxSpeed = setting("flyMaxSpeed", flyMaxSpeed);
     giSunBakeInterval = setting("giSunBakeInterval", giSunBakeInterval);
     giSunStepDeg = setting("giSunStepDeg", giSunStepDeg);
+    giDim = (int)setting("giDim", (float)giDim);
+	giCascades = (int)setting("giCascades", (float)giCascades);
+	giVoxelsPerCascade = giDim * giDim * giDim;
+	cascadeRays[0] = (int)setting("cascadeRays0", (float)cascadeRays[0]);
+	cascadeRays[1] = (int)setting("cascadeRays1", (float)cascadeRays[1]);
+	cascadeRays[2] = (int)setting("cascadeRays2", (float)cascadeRays[2]);
+	totalGiVoxels = giCascades * giVoxelsPerCascade;
+
+	for (int i = 0; i < 3; i++) cascadeDims[i] = giDim;
 
 	if (!glfwInit()) {
 		std::cout << "ERROR: cannot initialize GLFW.";
@@ -2709,6 +2719,7 @@ int main() {
 	glUniform1i(brickDimXLoc, brickDimX);
 	glUniform1i(brickDimYLoc, brickDimY);
 	glUniform1i(brickDimZLoc, brickDimZ);
+	glUniform1i(giDimLoc, giDim);
 
 	glUniform1f(ssaoRadiusLoc, setting("ssaoRadius", 2.5f));
 	glUniform1f(ssaoBiasLoc, setting("ssaoBias", 0.003f));
@@ -2829,7 +2840,11 @@ int main() {
     	glm::ivec3(0)
     };
 
-    float giVoxelSizeArr[giCascades] = { 1.0f, 4.0f, 16.0f };
+    float giVoxelSizeArr[3] = { 
+    	setting("giVoxelSize0", 2.0f),
+        setting("giVoxelSize1", 8.0f),
+        setting("giVoxelSize2", 32.0f)
+    };
 
     GLuint svoSsbo;
 
@@ -3120,7 +3135,7 @@ int main() {
 
             	glUniform1i(giCascadeLoc, c);
             	glUniform1i(giDimLoc, dim);
-            	glUniform1i(girayCountLoc, cascadeDims[c]);
+            	glUniform1i(girayCountLoc, cascadeRays[c]);
 
             	glDispatchCompute(dim / 4, dim / 4, dim / 4);
             	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);

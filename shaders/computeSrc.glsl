@@ -2,8 +2,6 @@
 
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
-const int nGi = 64;
-const uint giVoxels = 64u * 64u * 64u;
 const float multiBounceFeedbackMultiplier = 0.45;
 // WARNING: unserious comments
 // i guess ill put comments in compute because this is so hard to understand
@@ -35,17 +33,21 @@ uniform float giVoxelSizes[3];
 uniform int uGiDim;
 uniform int uRayCount;
 
+int nGi;
+
 uint voxelIndex(ivec3 p) {
+	nGi = int(uGiDim);
 	return uint((p.z * nGi + p.y) * nGi + p.x);
 }
 
 bool insideGrid(ivec3 p) {
+	nGi = int(uGiDim);
 	return all(greaterThanEqual(p, ivec3(0))) && all(lessThan(p, ivec3(nGi)));
 }
 
 vec3 albedoFor(uint type) {
 	if (type == 1u) return vec3(0.15, 0.15, 0.17);
-	if (type == 2u) return vec3(0.17, 0.08, 0.03);
+	if (type == 2u) return vec3(0.32, 0.24, 0.18);
 	if (type == 3u) return vec3(0.07, 0.23, 0.03);
 	if (type == 4u) return vec3(0.83, 0.87, 0.93);
 
@@ -54,14 +56,16 @@ vec3 albedoFor(uint type) {
 
 vec3 getRayDir(int r, float jitter) {
 	float a = float(r) * 1.04719755 + jitter;
-	float z = (float(r) + 0.5) / 3.0 - 1.0;
+	float z = (float(r) + 0.5) / float(uRayCount) - 1.0;
 	float rad = sqrt(max(0.0, 1.0 - z * z));
 
 	return vec3(cos(a) * rad, z, sin(a) * rad);
 }
 
 vec3 sampleUpperCascade(int upperC, vec3 wp) {
-	vec3 p = clamp((wp - vec3(giOrigins[upperC])) / giVoxelSizes[upperC], vec3(0.0), vec3(63.0));
+	uint giVoxels = uint(uGiDim * uGiDim * uGiDim);
+
+	vec3 p = clamp((wp - vec3(giOrigins[upperC])) / giVoxelSizes[upperC], vec3(0.0), vec3(float(uGiDim - 1)));
 
 	uint idx = uint(upperC) * giVoxels + voxelIndex(ivec3(floor(p)));
 
@@ -69,6 +73,10 @@ vec3 sampleUpperCascade(int upperC, vec3 wp) {
 }
 
 void main() {
+	uint giVoxels = uint(uGiDim * uGiDim * uGiDim);
+
+	nGi = int(uGiDim);
+
 	ivec3 p = ivec3(gl_GlobalInvocationID.xyz);
 	if (!insideGrid(p)) return;
 
@@ -77,6 +85,27 @@ void main() {
 	uint localIdx = voxelIndex(p);
 	uint cOffset = uint(uCascadeIndex) * giVoxels;
 	uint gIdx = cOffset + localIdx;
+
+	bool hasNearbySolid = false;
+
+	for (int z = -1; z <= 1 && !hasNearbySolid; z++) {
+		for (int y = -1; y <= 1 && !hasNearbySolid; y++) {
+			for (int x = -1; x <= 1; x++) {
+				ivec3 np = p + ivec3(x, y, z);
+				if (insideGrid(np) && voxelType[cOffset + voxelIndex(np)] != 0u) {
+					hasNearbySolid = true;
+					break;
+				}
+			}
+		}
+	}
+
+	if (!hasNearbySolid) {
+		giHistory[gIdx] = vec4(0.0);
+		giOutput[gIdx] = 0u;
+
+		return;
+	}
 
 	float tStart = (uCascadeIndex == 0) ? 0.6 : (uCascadeIndex == 1) ? 4.0 : 10.0;
 	float tEnd = (uCascadeIndex == 0) ? 4.0 : (uCascadeIndex == 1) ? 10.0 : 20.0;
@@ -92,7 +121,7 @@ void main() {
     vec3 skyCol = mix(vec3(0.01, 0.01, 0.04), vec3(0.45, 0.55, 0.70), day);
     vec3 rad = vec3(0.0);
 
-    for (int r = 0; r < 6; ++r) {
+    for (int r = 0; r < uRayCount; ++r) {
     	vec3 rd = getRayDir(r, jitter);
 
     	bool hit = false;
@@ -116,12 +145,15 @@ void main() {
     	}
 
     	if (hit) {
-    		vec3 albedo = albedoFor(hitType);
+    		vec3 albedo = albedoFor(hitType) * 1.8;
+
+    		ivec3 airVox = hitVox - ivec3(round(rd));
+    		ivec3 sampleVox = insideGrid(airVox) ? airVox : hitVox;
 
     		bool sh = insideGrid(hitVox + ivec3(round(uSunDir * 3.0))) && voxelType[cOffset + voxelIndex(hitVox + ivec3(round(uSunDir * 3.0)))] != 0u;
 
     		vec3 direct = albedo * sunCol * day * (sh ? 0.10 : 1.0);
-    		vec3 bounce = albedo * giHistory[cOffset + voxelIndex(hitVox)].rgb * multiBounceFeedbackMultiplier;
+    		vec3 bounce = albedo * giHistory[cOffset + voxelIndex(sampleVox)].rgb * multiBounceFeedbackMultiplier;
 
     		rad += direct + bounce;
     	} else if (uCascadeIndex < 2) {
@@ -131,7 +163,7 @@ void main() {
     	}
     }
 
-    vec3 blended = mix(giHistory[gIdx].rgb, rad / 6.0, 0.20);
+    vec3 blended = mix(giHistory[gIdx].rgb, rad / float(uRayCount), 0.20);
 
     giHistory[gIdx] = vec4(blended, 1.0);
 

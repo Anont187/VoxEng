@@ -76,6 +76,7 @@ uniform float giVoxelSizes[3];
 uniform float uAutoExposureFloor;
 uniform float uExposureMin;
 uniform float uExposureMax;
+uniform int uGiDim;
 
 const int brickSize = 8;
 const int cascadeDims[3] = int[3](32, 16, 8);
@@ -138,10 +139,9 @@ vec3 renderSky(vec2 screenUV) {
     float sunDot = dot(dir, sunDir);
     float sunDisc = smoothstep(0.9993, 0.9996, sunDot);
     float sunGlow = pow(max(sunDot, 0.0), 128.0);
-    vec3 sunColor = mix(vec3(1.0, 0.55, 0.25), vec3(1.0, 0.95, 0.85),
-                        smoothstep(0.05, 0.4, sunHeight));
+    vec3 sunColor = mix(vec3(1.0, 0.55, 0.25), vec3(1.0, 0.95, 0.85), smoothstep(0.05, 0.4, sunHeight));
     skyColor += sunColor * sunGlow * 1.5 * max(dayAmount, 0.2);
-    skyColor += sunColor * sunDisc * 8.0;
+    skyColor += sunColor * sunDisc * 3.5;
 
     float nightAmount = 1.0 - dayAmount;
 
@@ -603,24 +603,24 @@ float linearDepth(float d) {
 
 float giCoverage(int c, vec3 wp) {
     vec3 p = (wp - vec3(giOrigins[c])) / max(giVoxelSizes[c], 1e-3);
-    vec3 e = min(p, 63.0 - p);
+    vec3 e = min(p, float(uGiDim - 1) - p);
 
     return smoothstep(0.0, 4.0, min(e.x, min(e.y, e.z)));
 }
 
 vec3 giSampleCascade(int c, vec3 wp) {
-    vec3 p = clamp((wp - vec3(giOrigins[c])) / max(giVoxelSizes[c], 1e-3), vec3(0.0), vec3(63.0));
+    vec3 p = clamp((wp - vec3(giOrigins[c])) / max(giVoxelSizes[c], 1e-3), vec3(0.0), vec3(float(uGiDim - 1)));
     vec3 pf = floor(p);
 
     ivec3 b = ivec3(pf);
 
     vec3 f = p - pf;
 
-    ivec3 c1 = min(b + ivec3(1), ivec3(63));
+    ivec3 c1 = min(b + ivec3(1), ivec3(uGiDim - 1));
 
-    int base = c * 64 * 64 * 64;
+    int base = c * uGiDim * uGiDim * uGiDim;
 
-    #define Lgt(x,y,z) unpackUnorm4x8(giVoxels[base + ((z) * 64 + (y)) * 64 + (x)]).rgb
+    #define Lgt(x,y,z) unpackUnorm4x8(giVoxels[base + ((z) * uGiDim + (y)) * uGiDim + (x)]).rgb
 
     vec3 v000 = Lgt(b.x, b.y, b.z);
     vec3 v100 = Lgt(c1.x, b.y, b.z);
@@ -970,9 +970,9 @@ void main() {
         }
 
         vec3 skyAmb = mix(vec3(0.005, 0.01, 0.02), vec3(0.45, 0.55, 0.70), dayAmount);
-        vec3 grdAmb = mix(vec3(0.001, 0.002, 0.005), vec3(0.20, 0.15, 0.10), dayAmount);
-		vec3 ambient = mix(grdAmb, skyAmb, normal.y * 0.5 + 0.5) * contactAo;
-		vec3 indirect = (viewDist < 96.0) ? giSample(vWorldPos + normal * 1.25) * uGiStrength : skyAmb * 0.25 * uGiStrength;
+        vec3 grdAmb = mix(vec3(0.001, 0.002, 0.005), vec3(0.28, 0.25, 0.22), dayAmount);
+		vec3 ambient = mix(grdAmb, skyAmb, normal.y * 0.5 + 0.5) * contactAo * 0.85;
+		vec3 indirect = (viewDist < 96.0) ? giSample(vWorldPos + normal * (giVoxelSizes[0] * 0.75)) * uGiStrength : skyAmb * 0.25 * uGiStrength;
         vec3 viewDir = normalize(camPos - vWorldPos);
         vec3 halfVec = normalize(sunDir + viewDir);
 
@@ -982,7 +982,19 @@ void main() {
         float spec = pow(max(dot(normal, halfVec), 0.0), specPower) * gloss;
 
         vec3 skyReflect = mix(grdAmb, skyAmb, reflect(-viewDir, normal).y * 0.5 + 0.5);
-        vec3 direct = sunColor * (ndotl + spec) * sunAmount * contactAo;
+        vec3 direct = sunColor * 2.2 * (ndotl + spec) * sunAmount * contactAo;
+
+        float sunShadow = 1.0;
+
+        if (ndotl > 0.0 && viewDist < 36.0 && sunAmount > 0.01) {
+            vec3 sn, sp;
+
+            if (rmDda(vWorldPos + normal * 0.05, sunDir, 24.0, sn, sp)) {
+                sunShadow = mix(uShadowFactor, 1.0, smoothstep(28.0, 38.0, viewDist));
+            }
+        }
+
+        direct *= sunShadow;
 
 		color = texColor * (ambient + direct + indirect) + (skyReflect * fresnel * gloss * sunAmount);
 	}
