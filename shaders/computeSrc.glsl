@@ -4,7 +4,7 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
 const int nGi = 64;
 const uint giVoxels = 64u * 64u * 64u;
-
+const float multiBounceFeedbackMultiplier = 0.45;
 // WARNING: unserious comments
 // i guess ill put comments in compute because this is so hard to understand
 // this buffer contains final gi output yes
@@ -32,6 +32,8 @@ uniform vec3 uSunDir;
 uniform int uFrameIndex;
 uniform ivec3 giOrigins[3];
 uniform float giVoxelSizes[3];
+uniform int uGiDim;
+uniform int uRayCount;
 
 uint voxelIndex(ivec3 p) {
 	return uint((p.z * nGi + p.y) * nGi + p.x);
@@ -119,7 +121,7 @@ void main() {
     		bool sh = insideGrid(hitVox + ivec3(round(uSunDir * 3.0))) && voxelType[cOffset + voxelIndex(hitVox + ivec3(round(uSunDir * 3.0)))] != 0u;
 
     		vec3 direct = albedo * sunCol * day * (sh ? 0.10 : 1.0);
-    		vec3 bounce = albedo * giHistory[cOffset + voxelIndex(hitVox)].rgb * 0.45;
+    		vec3 bounce = albedo * giHistory[cOffset + voxelIndex(hitVox)].rgb * multiBounceFeedbackMultiplier;
 
     		rad += direct + bounce;
     	} else if (uCascadeIndex < 2) {

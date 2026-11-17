@@ -34,6 +34,7 @@ uniform float timeOfDay;
 uniform usamplerBuffer voxelTbo;
 uniform int playerChunkX;
 uniform int playerChunkZ;
+uniform int playerChunkY;
 uniform int maxHeightTerrain;
 uniform usamplerBuffer brickTbo;
 uniform int brickDimX;
@@ -77,6 +78,9 @@ uniform float uExposureMin;
 uniform float uExposureMax;
 
 const int brickSize = 8;
+const int cascadeDims[3] = int[3](32, 16, 8);
+const int cascadeRays[3] = int[3](4, 8, 16);
+const int cascadeOffsets[3] = int[3](0, 32768, 36864);
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -227,7 +231,7 @@ bool rmSvoBitSet(uvec2 mask, int bitIndex) {
 int rmSvoEmptyCellSize(ivec3 worldVoxel) {
 	ivec3 svoOrigin = ivec3(
 		(playerChunkX - 1) * 32,
-		0,
+		(playerChunkY - 1) * 32,
 		(playerChunkZ - 1) * 32
 	);
 
@@ -318,7 +322,7 @@ bool rmDda(vec3 ro, vec3 rd, float maxDist, out vec3 outNormal, out vec3 outHitP
         }
 
         if (svoSize > 1) {
-        	ivec3 svoOrigin = ivec3((playerChunkX - 1) * 32, 0, (playerChunkZ - 1) * 32);
+        	ivec3 svoOrigin = ivec3((playerChunkX - 1) * 32, (playerChunkY - 1) * 32, (playerChunkZ - 1) * 32);
 
         	ivec3 local = v - svoOrigin;
         	ivec3 cellMin = svoOrigin + (local / svoSize) * svoSize;
@@ -634,14 +638,26 @@ vec3 giSampleCascade(int c, vec3 wp) {
 
 vec3 giSample(vec3 wp) {
     float d = length(wp - camPos);
+    if (d < 24.0) {
+        return giSampleCascade(0, wp);
+    }
+
+    if (d < 32.0) {
+        vec3 l0 = giSampleCascade(0, wp);
+        vec3 l1 = giSampleCascade(1, wp);
+
+        return mix(l0, l1, smoothstep(24.0, 32.0, d));
+    }
     
+    if (d < 56.0) {
+        return giSampleCascade(1, wp);
+    }
+    
+    vec3 l1 = giSampleCascade(1, wp);
     vec3 l2 = giSampleCascade(2, wp) * giCoverage(2, wp);
-    vec3 l1 = mix(giSampleCascade(1, wp), l2, 1.0 - giCoverage(1, wp));
-    vec3 l0 = mix(giSampleCascade(0, wp), l1, 1.0 - giCoverage(0, wp));
-    if (d < 24.0) return l0;
-    if (d < 32.0) return mix(l0, l1, smoothstep(24.0, 32.0, d));
-    if (d < 56.0) return l1;
-    if (d < 72.0) return mix(l1, l2, smoothstep(56.0, 72.0, d));
+    if (d < 72.0) {
+        return mix(l1, l2, smoothstep(56.0, 72.0, d));
+    }
     
     return l2;
 }

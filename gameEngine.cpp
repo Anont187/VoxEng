@@ -79,6 +79,11 @@ constexpr int brickDimZ = brickDimX;
 constexpr int giDim = 64;
 constexpr int giCascades = 3;
 constexpr int giVoxelsPerCascade = giDim * giDim * giDim;
+constexpr int cascadeDims[3] = { giDim, giDim, giDim };
+constexpr int cascadeRays[3] = { 4, 8, 16 };
+constexpr int cascadeVoxels[3] = { 32 * 32 * 32, 16 * 16 * 16, 8 * 8 * 8 };
+constexpr int cascadeOffsets[3] = { 0, 32768, 36864 };
+constexpr int totalGiVoxels = giCascades * giVoxelsPerCascade;
 
 bool giDirty = true;
 
@@ -1619,10 +1624,6 @@ static void giFillAndLight(const chunkMap& ch, const glm::ivec3& origin, int vs,
 }
 
 static void giBuildVoxelTypes(const chunkMap& chunks, const glm::ivec3 origin, int vs, std::vector<uint32_t>& out) {
-	const int n = giDim;
-
-	out.assign(giVoxelsPerCascade, 0u);
-
 	const Chunk* cached = nullptr;
 
 	int oldCx = 0;
@@ -1631,9 +1632,9 @@ static void giBuildVoxelTypes(const chunkMap& chunks, const glm::ivec3 origin, i
 
 	bool cacheValid = false;
 
-	for (int z = 0; z < n; z++) {
-		for (int y = 0; y < n; y++) {
-			for (int x = 0; x < n; x++) {
+	for (int z = 0; z < giDim; z++) {
+		for (int y = 0; y < giDim; y++) {
+			for (int x = 0; x < giDim; x++) {
 				int wx = origin.x + x * vs;
 				int wy = origin.y + y * vs;
 				int wz = origin.z + z * vs;
@@ -1655,16 +1656,16 @@ static void giBuildVoxelTypes(const chunkMap& chunks, const glm::ivec3 origin, i
 
 				uint8_t type = getVoxel(*cached, wx - cx * chunkSize, wy - cy * chunkSize, wz - cz * chunkSize);
 
-				out[(z * n + y) * n + x] = type;
+				out[(z * giDim + y) * giDim + x] = type;
 			}
 		}
 	}
 }
 
-std::vector<svoNodeCpu> buildCpuSvo(const chunkMap& chunks, int playerChunkX, int playerChunkZ) {
+std::vector<svoNodeCpu> buildCpuSvo(const chunkMap& chunks, int playerChunkX, int playerChunkY, int playerChunkZ) {
 	int originX = (playerChunkX - 1) * chunkSize;
 	int originZ = (playerChunkZ - 1) * chunkSize;
-	int originY = 0;
+	int originY = (playerChunkY - 1) * chunkSize;
 
 	auto isSolidWorld = [&](int wx, int wy, int wz) -> bool {
 		if (wy < 0 || wy >= worldHeight) return false;
@@ -2268,6 +2269,7 @@ int main() {
 
     int playerChunkX = static_cast<int>(std::floor(camPos.x / static_cast<float>(chunkSize)));
 	int playerChunkZ = static_cast<int>(std::floor(camPos.z / static_cast<float>(chunkSize)));
+	int playerChunkY = static_cast<int>(std::floor(camPos.y / static_cast<float>(chunkSize)));
 
     auto buildVoxelTbo = [&](const chunkMap& ch, int pcx, int pcz) {
     	std::vector<uint32_t> data(chunksPerColumn * 25 * 1024, 0u) ;
@@ -2388,6 +2390,7 @@ int main() {
     GLint voxelTboLoc = glGetUniformLocation(shaderProgram, "voxelTbo");
     GLint rmPlayerXLoc = glGetUniformLocation(shaderProgram, "playerChunkX");
     GLint rmPlayerZLoc = glGetUniformLocation(shaderProgram, "playerChunkZ");
+    GLint rmPlayerYLoc = glGetUniformLocation(shaderProgram, "playerChunkY");
     GLint brickTboLoc = glGetUniformLocation(shaderProgram, "brickTbo");
     GLint lightingModeLoc = glGetUniformLocation(shaderProgram, "lightingMode");
     GLint brickDimXLoc = glGetUniformLocation(shaderProgram, "brickDimX");
@@ -2431,6 +2434,10 @@ int main() {
 	GLint giSunDirLoc = glGetUniformLocation(computeProgram, "uSunDir");
 	GLint giPackFromALoc = glGetUniformLocation(computeProgram, "uPackFromA");
 	GLint frameIndexLoc = glGetUniformLocation(computeProgram, "uFrameIndex");
+	GLint giDimLoc = glGetUniformLocation(computeProgram, "uGiDim");
+	GLint girayCountLoc = glGetUniformLocation(computeProgram, "uRayCount");
+	GLint giOriginsCLoc = glGetUniformLocation(computeProgram, "giOrigins");
+	GLint giVoxelSizesCLoc = glGetUniformLocation(computeProgram, "giVoxelSizes");
 
     std::cout << "STARTUP: Made Compute LOOKUP Locations.\n" << std::flush;
 
@@ -2789,13 +2796,15 @@ int main() {
     GLsizeiptr lightBytes = (GLsizeiptr)giVoxelsPerCascade * sizeof(float) * 4;
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, giSsbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, giCascades * giVoxelsPerCascade * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, totalGiVoxels * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
-	glBufferData(GL_SHADER_STORAGE_BUFFER, giCascades * voxelBytes, nullptr, GL_DYNAMIC_DRAW);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, totalGiVoxels * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
 	
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, giBaseSsbo);
-	glBufferData(GL_SHADER_STORAGE_BUFFER, giCascades * lightBytes, nullptr, GL_DYNAMIC_DRAW);
+	
+	std::vector<float> zeroHistory((size_t)totalGiVoxels * 4, 0.0f);
+	glBufferData(GL_SHADER_STORAGE_BUFFER, zeroHistory.size() * sizeof(float), zeroHistory.data(), GL_DYNAMIC_DRAW);;
 	
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, giLightA);
 	glBufferData(GL_SHADER_STORAGE_BUFFER, lightBytes, nullptr, GL_DYNAMIC_DRAW);
@@ -2812,7 +2821,7 @@ int main() {
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     std::vector<uint32_t> giCpu;
-    std::vector<std::vector<uint32_t>> giVoxelCache(giCascades, std::vector<uint32_t>(giVoxelsPerCascade));
+    std::vector<std::vector<uint32_t>> giVoxelCache(giCascades, std::vector<uint32_t>(giVoxelsPerCascade, 0u));
 
     glm::ivec3 giOrigin[giCascades] = {
     	glm::ivec3(0),
@@ -2820,7 +2829,7 @@ int main() {
     	glm::ivec3(0)
     };
 
-    float giVoxelSizeArr[giCascades] = { 1, 2, 4 };
+    float giVoxelSizeArr[giCascades] = { 1.0f, 4.0f, 16.0f };
 
     GLuint svoSsbo;
 
@@ -3005,13 +3014,16 @@ int main() {
 		glUniform3f(sunDirLoc, sunDir.x, sunDir.y, sunDir.z);
 
 		int newChunkX = static_cast<int>(std::floor(camPos.x / static_cast<float>(chunkSize)));
+		int newChunkY = static_cast<int>(std::floor(camPos.y / static_cast<float>(chunkSize)));
 		int newChunkZ = static_cast<int>(std::floor(camPos.z / static_cast<float>(chunkSize)));
 
 		static int lastTboChunkX = INT32_MIN;
 		static int lastTboChunkZ = INT32_MIN;
+		static int lastTboChunkY = INT32_MIN;
 
-		if (chunksNeedUpdate || newChunkX != lastTboChunkX || newChunkZ != lastTboChunkZ) {
+		if (chunksNeedUpdate || newChunkX != lastTboChunkX || newChunkZ != lastTboChunkZ || newChunkY != lastTboChunkY) {
 			playerChunkX = newChunkX;
+			playerChunkY = newChunkY;
 			playerChunkZ = newChunkZ;
 
 		    rebuildChunks();
@@ -3021,7 +3033,7 @@ int main() {
 		    uploadVoxelTbo();
 		    uploadBrickTbo();
 
-		    std::vector<svoNodeCpu> currentSvo = buildCpuSvo(chunks, playerChunkX, playerChunkZ);
+		    std::vector<svoNodeCpu> currentSvo = buildCpuSvo(chunks, playerChunkX, playerChunkY, playerChunkZ);
 
 		    glBindBuffer(GL_SHADER_STORAGE_BUFFER, svoSsbo);
 		    glBufferData(GL_SHADER_STORAGE_BUFFER, currentSvo.size() * sizeof(svoNodeCpu), currentSvo.data(), GL_DYNAMIC_DRAW);
@@ -3030,6 +3042,7 @@ int main() {
 
 			lastTboChunkX = newChunkX;
 			lastTboChunkZ = newChunkZ;
+			lastTboChunkY = newChunkY;
 
 			chunksNeedUpdate = false;
 		}
@@ -3098,14 +3111,18 @@ int main() {
 
             giDirty = false;
 
-            glUniform3iv(giOriginsLoc, giCascades, (const GLint*)giOrigin);
+            glUniform3iv(giOriginsCLoc, giCascades, (const GLint*)giOrigin);
 
-            glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
+            glUniform1fv(giVoxelSizesCLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
 
             for (int c = giCascades - 1; c >= 0; c--) {
-            	glUniform1i(giCascadeLoc, c);
+            	int dim = cascadeDims[c];
 
-            	glDispatchCompute(giDim / 4, giDim / 4, giDim / 4);
+            	glUniform1i(giCascadeLoc, c);
+            	glUniform1i(giDimLoc, dim);
+            	glUniform1i(girayCountLoc, cascadeDims[c]);
+
+            	glDispatchCompute(dim / 4, dim / 4, dim / 4);
             	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
             }
 
@@ -3117,6 +3134,9 @@ int main() {
 
             glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
         }
+
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svoSsbo);
 
 		glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
 		glViewport(0, 0, pastWidth, pastHeight);
@@ -3141,6 +3161,7 @@ int main() {
 
 		glUniform1i(rmPlayerXLoc, playerChunkX);
 		glUniform1i(rmPlayerZLoc, playerChunkZ);
+		glUniform1i(rmPlayerYLoc, playerChunkY);
 		glUniform1i(frameIdxLoc, accumFrame);
 
 		glUniform2fv(ssgiOffsetsLoc, (GLsizei)ssgiOffsets.size(), (const GLfloat*)ssgiOffsets.data());
