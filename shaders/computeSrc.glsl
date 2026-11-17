@@ -1,3 +1,13 @@
+/*
+ * Copyright 2026 Anont187
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/
+ */
+
 #version 430 core
 
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
