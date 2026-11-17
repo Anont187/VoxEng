@@ -1,6 +1,8 @@
 # VoxEng
 Refined version of the previous c engine. Made in C++ and GLSL.
 
+The project is currently fixated around terrain. Actual engine gui is coming soon (both ui for the engine and the game)
+
 ## HOW TO COMPILE
 You need a modern C++ Compiler (e.g. GCC, CLang, or MinGW) alongside CMake.
 
