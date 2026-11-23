@@ -65,11 +65,13 @@ vec3 albedoFor(uint type) {
 }
 
 vec3 getRayDir(int r, float jitter) {
-	float a = float(r) * 1.04719755 + jitter;
-	float z = (float(r) + 0.5) / float(uRayCount) - 1.0;
-	float rad = sqrt(max(0.0, 1.0 - z * z));
+    float y = 1.0 - 2.0 * ((float(r) + 0.5) / float(uRayCount));
 
-	return vec3(cos(a) * rad, z, sin(a) * rad);
+    float a = float(r) * 2.39996323 + jitter;
+
+    float rad = sqrt(max(0.0, 1.0 - y * y));
+
+    return vec3(cos(a) * rad, y, sin(a) * rad);
 }
 
 vec3 sampleUpperCascade(int upperC, vec3 wp) {
@@ -125,10 +127,17 @@ void main() {
 	vec3 probeLocal = vec3(p) + 0.5;
 	vec3 probeWorld = vec3(giOrigins[uCascadeIndex]) + probeLocal * giVoxelSizes[uCascadeIndex];
 
-	float day = smoothstep(-0.1, 0.3, uSunDir.y);
+	float sunH = uSunDir.y;
+	float day = clamp(sunH * 3.0, 0.0, 1.0);
+	float golden = clamp(1.0 - abs(sunH - 0.10) / 0.18, 0.0, 1.0);
+	float blue = clamp(1.0 - abs(sunH + 0.06) / 0.14, 0.0, 1.0);
 
-    vec3 sunCol = mix(vec3(1.0, 0.50, 0.20), vec3(1.0, 0.95, 0.85), smoothstep(0.0, 0.4, uSunDir.y));
-    vec3 skyCol = mix(vec3(0.01, 0.01, 0.04), vec3(0.45, 0.55, 0.70), day);
+	vec3 sunCol = mix(vec3(0.12, 0.18, 0.32), vec3(1.00, 0.96, 0.90), day);
+	sunCol = mix(sunCol, vec3(1.00, 0.52, 0.20), golden);
+
+	vec3 skyCol = mix(vec3(0.02, 0.04, 0.09), vec3(0.36, 0.64, 1.00), day);
+	skyCol = mix(skyCol, vec3(0.12, 0.24, 0.52), blue);
+
     vec3 rad = vec3(0.0);
 
     for (int r = 0; r < uRayCount; ++r) {

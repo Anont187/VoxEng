@@ -9,6 +9,9 @@ float baseSensitivity = 0.071f;
 float bfov = 70.0f;
 float giSunBakeInterval = 0.0f;
 float giSunStepDeg = 2.0f;
+float maxZoomFov = 70.0f;
+float zoomZoomRate = 42.0f;
+float zoomZoomAccel = 140.0f;
 
 const float PI = 3.14159265f;
 const float dayLengthSec = 360.0f;
@@ -37,11 +40,13 @@ constexpr float flyMaxSpeed = 10.0f;
 constexpr bool kCurtainRays = false;
 constexpr int baseSnowLine = worldHeight * 58 / 100;
 
-int giDim = 32;
+int giDim = 16;
 int giCascades = 3;
 int cascadeRays0 = 3;
 int cascadeRays1 = 4;
 int cascadeRays2 = 5;
+
+int frameGenAmount = 2;
 
 const char* stringed = "basic window";
 const float renderScale = 0.76f;
@@ -49,13 +54,14 @@ const float renderScale = 0.76f;
 float ssaoRadius = 0.75f;
 float ssaoBias = 0.003f;
 float ssaoIntensity = 1.5f;
-float shadowFactor = 0.10f;
-float giStrength = 2.8f;
-float bloomStrength = 1.35f;
-float exposureKey = 0.28f;
+float shadowFactor = 0.20f;
+float giStrength = 1.25f;
+float bloomStrength = 0.22f;
+float exposureKey = 0.18f;
 float exposureBias = 0.5f;
 float exposureSpeed = 1.5f;
 float giDebug = 0.0f;
-float aeFloor = 0.;
-float exposureMin = 0.55f;
-float exposureMax = 2.20f;
+float aeFloor = 0.01f;
+float exposureMin = 0.50f;
+float exposureMax = 1.35f;
+float motionBlurScale = 0.55f;

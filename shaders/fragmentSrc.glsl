@@ -30,6 +30,7 @@ layout(std430, binding = 2) readonly buffer svoVolume {
 in vec2 vUv;
 in vec2 vSkyUv;
 in vec3 vWorldPos;
+in float vAo;
 
 flat in uint vLayer;
 flat in uint vFace;
@@ -87,11 +88,21 @@ uniform float uAutoExposureFloor;
 uniform float uExposureMin;
 uniform float uExposureMax;
 uniform int uGiDim;
+uniform vec3 uSunColor;
+uniform vec3 uSkyColor;
+uniform vec3 uHorizonColor;
+uniform vec2 uSunScreenUV;
+uniform float uSunVisible;
+uniform mat4 prevViewProj;
+uniform vec2 uInternalTexelSize;
+uniform int uGgtuEnabled;
+uniform float uMotionBlurScale;
 
 const int brickSize = 8;
 const int cascadeDims[3] = int[3](32, 16, 8);
 const int cascadeRays[3] = int[3](4, 8, 16);
 const int cascadeOffsets[3] = int[3](0, 32768, 36864);
+const float PI = 3.14159265;
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -131,27 +142,49 @@ vec3 renderSky(vec2 screenUV) {
     float sunHeight = sunDir.y;
     float dayAmount = smoothstep(-0.15, 0.25, sunHeight);
 
-    vec3 nightSky = vec3(0.0001, 0.0002, 0.0005);
-    vec3 daySky   = vec3(0.10, 0.27, 0.69);
-    vec3 dawnDusk = vec3(0.69, 0.10, 0.02);
+    vec3 skyColor;
+    vec3 activeSunColor;
 
-    vec3 skyColor = mix(nightSky, daySky, dayAmount);
+    if (lightingMode == 1) {
+        float zenithFactor = clamp(pow(max(dir.y, 0.0), 0.65), 0.0, 1.0);
+        skyColor = mix(uHorizonColor, uSkyColor, zenithFactor);
 
-    float sunsetMask = exp(-sunHeight * sunHeight * 25.0);
-    vec2 hDir = normalize(vec2(dir.x, dir.z) + vec2(1e-6));
-    vec2 hSun = normalize(vec2(sunDir.x, sunDir.z) + vec2(1e-6));
-    float sunSide = smoothstep(-0.5, 1.0, dot(hDir, hSun));
-    skyColor = mix(skyColor, dawnDusk, sunsetMask * sunSide * 0.9);
+        float sunsetMask = exp(-sunHeight * sunHeight * 22.0);
+        
+        vec2 hDir = normalize(vec2(dir.x, dir.z) + vec2(1e-6));
+        vec2 hSun = normalize(vec2(sunDir.x, sunDir.z) + vec2(1e-6));
+        
+        float sunSide = smoothstep(-0.4, 1.0, dot(hDir, hSun));
+        skyColor = mix(skyColor, uHorizonColor * 1.35, sunsetMask * sunSide * 0.65);
 
-    float horizon = exp(-abs(dir.y) * 2.5);
-    skyColor += vec3(0.15, 0.12, 0.08) * horizon * dayAmount;
+        activeSunColor = uSunColor;
+    } else {
+        vec3 nightSky = vec3(0.0001, 0.0002, 0.0005);
+        vec3 daySky   = vec3(0.10, 0.27, 0.69);
+        vec3 dawnDusk = vec3(0.69, 0.10, 0.02);
+
+        skyColor = mix(nightSky, daySky, dayAmount);
+
+        float sunsetMask = exp(-sunHeight * sunHeight * 25.0);
+        
+        vec2 hDir = normalize(vec2(dir.x, dir.z) + vec2(1e-6));
+        vec2 hSun = normalize(vec2(sunDir.x, sunDir.z) + vec2(1e-6));
+        
+        float sunSide = smoothstep(-0.5, 1.0, dot(hDir, hSun));
+        skyColor = mix(skyColor, dawnDusk, sunsetMask * sunSide * 0.9);
+
+        float horizon = exp(-abs(dir.y) * 2.5);
+        skyColor += vec3(0.15, 0.12, 0.08) * horizon * dayAmount;
+
+        activeSunColor = mix(vec3(1.0, 0.55, 0.25), vec3(1.0, 0.95, 0.85), smoothstep(0.05, 0.4, sunHeight));
+    }
 
     float sunDot = dot(dir, sunDir);
     float sunDisc = smoothstep(0.9993, 0.9996, sunDot);
     float sunGlow = pow(max(sunDot, 0.0), 128.0);
-    vec3 sunColor = mix(vec3(1.0, 0.55, 0.25), vec3(1.0, 0.95, 0.85), smoothstep(0.05, 0.4, sunHeight));
-    skyColor += sunColor * sunGlow * 1.5 * max(dayAmount, 0.2);
-    skyColor += sunColor * sunDisc * 3.5;
+    
+    skyColor += activeSunColor * sunGlow * 1.5 * max(dayAmount, 0.2);
+    skyColor += activeSunColor * sunDisc * 3.5;
 
     float nightAmount = 1.0 - dayAmount;
 
@@ -171,6 +204,7 @@ vec3 renderSky(vec2 screenUV) {
 
         float shape = curtain * (0.35 + 0.65 * rays);
         float altitude = smoothstep(-0.25, 0.35, dir.y - 0.35);
+        
         vec3 green = vec3(0.18, 1.0, 0.55);
         vec3 pink = vec3(1.0, 0.30, 0.55);
         vec3 auroraColor = mix(green, pink, altitude);
@@ -527,49 +561,37 @@ vec3 aces(vec3 x) {
 	return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
-float fragAo(vec3 worldPos, vec3 normal) {
-	ivec3 vox = ivec3(floor(worldPos - normal * 0.5));
-	ivec3 inorm = ivec3(round(normal));
+vec3 agx(vec3 x) {
+    x = max(x, vec3(0.0));
 
-	vec3 absN = abs(normal);
+    mat3 inset = mat3(
+        0.842479, 0.042328, 0.042375,
+        0.078433, 0.878468, 0.078433,
+        0.079223, 0.079166, 0.879142
+    );
 
-	ivec3 uDir, vDir;
+    x = inset * x;
+    x = log2(clamp(x, 1e-5, 65504.0));
+    x = (x + 12.47393) / (12.47393 + 4.026069);
+    x = clamp(x, 0.0, 1.0);
 
-	float fu, fv;
+    vec3 x2 = x * x;
+    vec3 x4 = x2 * x2;
 
-	vec3 lp = worldPos - vec3(vox);
-
-	if (absN.x > 0.5) {
-		uDir = ivec3(0, 1, 0);
-		vDir = ivec3(0, 0, 1);
-
-		fu = lp.y;
-		fv = lp.z;
-	} else if (absN.y > 0.5) {
-		uDir = ivec3(1, 0, 0);
-		vDir = ivec3(0, 0, 1);
-
-		fu = lp.x;
-		fv = lp.z;
-	} else {
-		uDir = ivec3(1, 0, 0);
-		vDir = ivec3(0, 1, 0);
-
-		fu = lp.x;
-		fv = lp.y;
-	}
-
-	#define corner(ud, vd) (rmGetVoxel(vox + (ud) + inorm) && rmGetVoxel(vox +  (vd) + inorm)) ? 0.0 : float(3 - int(rmGetVoxel(vox + (ud) + inorm)) - int(rmGetVoxel(vox + (vd) + inorm)) - int(rmGetVoxel(vox + (ud) + (vd) + inorm)))
-
-	float bl = corner(-uDir, -vDir);
-	float br = corner( uDir, -vDir);
-	float tr = corner( uDir,  vDir);
-	float tl = corner(-uDir,  vDir);
-
-	#undef corner
-
-	return mix(mix(bl, br, fu), mix(tl, tr, fu), fv);
+    return clamp(15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x, 0.0, 1.0);
 }
+
+float ign(vec2 pixel) {
+    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+}
+
+float hgPhase(float cosTheta, float g) {
+    float g2 = g * g;
+
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 0.001), 1.5));
+}
+
+
 
 vec3 bloomThreshold(vec3 c) {
 	float brightness = max(c.r, max(c.g, c.b));
@@ -580,6 +602,101 @@ vec3 bloomThreshold(vec3 c) {
 	contribution /= max(brightness, 1e-5);
 
 	return c * contribution;
+}
+
+vec3 reconstructWorld(vec2 uv, float depth) {
+    vec4 h = invViewProj * vec4(
+        uv * 2.0 - 1.0,
+        depth * 2.0 - 1.0,
+        1.0
+    );
+
+    return h.xyz / h.w;
+}
+
+vec3 computeVolumetricSunRays(vec2 uv, vec2 fragCoord) {
+    float sunH = sunDir.y;
+    if (sunH < -0.12) return vec3(0.0);
+
+    float depth = texture(uSceneDepth,uv).r;
+
+    bool isSky = depth >= 0.9999;
+
+    vec3 worldPos = reconstructWorld(uv, depth);
+    vec3 rayVec = worldPos - camPos;
+
+    float dist = length(rayVec);
+
+    vec3 rd = rayVec / max(dist, 1e-4);
+
+    float maxDist = isSky ? 48.0 : min(dist, 80.0);
+    float jitter = fract(ign(fragCoord) + float(uFrameIndex) * 0.6180339);
+
+    const int steps1 = 10;
+
+    float stepSize = maxDist / float(steps1);
+
+    ivec3 brickOrigin = ivec3((playerChunkX - 2) * 32, 0, (playerChunkZ - 2) * 32) >> 3;
+
+    float transmittance = 0.0;
+
+    for (int i = 0; i < steps1; i++) {
+        float t = (float(i) + jitter) * stepSize;
+
+        vec3 samplePos = camPos + rd * t;
+
+        float heightDensity = exp(-max(samplePos.t - 28.0, 0.0) * 0.035);
+
+        bool inShadow = false;
+
+        for (int s = 1; s <= 4; s++) {
+            vec3 shadowPos = samplePos + sunDir * (float(s) * 8.0);
+
+            ivec3 bv = (ivec3(floor(shadowPos)) >> 3) - brickOrigin;
+            if (rmBrickOccupied(bv)) {
+                inShadow = true;
+
+                break;
+            }
+        }
+
+        if (!inShadow) {
+            transmittance += heightDensity * stepSize;
+        }
+    }
+
+    float cosTheta = dot(rd, normalize(sunDir));
+    float phase = clamp(hgPhase(cosTheta, 0.82), 0.0, 1.35);
+
+    vec3 normalizedSun = uSunColor / max(max(uSunColor.r, max(uSunColor.g, uSunColor.b)), 1.0);
+
+    float elevationFade = smoothstep(-0.12, 0.08, sunH);
+    float skyAtten = isSky? 0.35 : 1.0;
+
+    return normalizedSun * (transmittance * 0.0045) * phase * elevationFade * skyAtten;
+}
+
+vec3 colorGrade(vec3 c, float sunH) {
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.722));
+    float shadowMask = 1.0 - smoothstep(0.0, 0.45, luma);
+    float highlightMask = smoothstep(0.55, 1.0, luma);
+
+    vec3 shadowTint = vec3(0.94, 0.98, 1.05);
+    vec3 highlightTint = mix(vec3(1.06, 0.96, 0.88), vec3(1.03, 1.01, 0.98), smoothstep(0.0, 0.4, sunH));
+
+    c *= mix(vec3(1.0), shadowTint, shadowMask * 0.6);
+    c *= mix(vec3(1.0), highlightTint, highlightMask * 0.5);
+
+    float maxChannel = max(c.r, max(c.g, c.b));
+    float minChannel = min(c.r, min(c.g, c.b));
+    float sat = maxChannel - minChannel;
+    float vibrance = 0.22 * (1.0 - sat);
+
+    c = mix(vec3(luma), c, 1.0 + vibrance);
+    c = clamp(c, 0.0, 1.0);
+    c = mix(c, c * c * (3.0 - 2.0 * c), 0.18);
+
+    return c;
 }
 
 vec3 bloomBlur(vec2 uv) {
@@ -593,16 +710,6 @@ vec3 bloomBlur(vec2 uv) {
     result += texture(uBloomInput, uv - t * 3.230769).rgb * 0.070270;
 
     return result;
-}
-
-vec3 reconstructWorld(vec2 uv, float depth) {
-	vec4 h = invViewProj * vec4(
-		uv * 2.0 - 1.0,
-		depth * 2.0 - 1.0,
-		1.0
-	);
-
-	return h.xyz / h.w;
 }
 
 float linearDepth(float d) {
@@ -672,8 +779,107 @@ vec3 giSample(vec3 wp) {
     return l2;
 }
 
+vec3 rgbToYCoCg(vec3 c) {
+    return vec3(
+         0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+         0.50 * c.r - 0.5 * c.b,
+        -0.25 * c.r + 0.5 * c.g - 0.25 * c.b
+    );
+}
+
+vec3 yCoCgToRgb(vec3 ycc) {
+    return vec3(
+        ycc.x + ycc.y - ycc.z,
+        ycc.x + ycc.z,
+        ycc.x - ycc.y - ycc.z
+    );
+}
+
+vec3 applyMotionBlur(sampler2D tex, vec2 uv, vec2 velocity) {
+    float speed = length(velocity);
+    if (speed < 0.0015 || uMotionBlurScale <= 0.01) {
+        return texture(tex, uv).rgb;
+    }
+
+    vec2 blurVec = velocity * uMotionBlurScale;
+
+    float maxLen = 0.035;
+    if (length(blurVec) > maxLen) {
+        blurVec = normalize(blurVec) * maxLen;
+    }
+
+    vec3 sum = texture(tex, uv).rgb;
+
+    sum += texture(tex, clamp(uv - blurVec * 0.33, 0.001, 0.999)).rgb;
+    sum += texture(tex, clamp(uv - blurVec * 0.66, 0.001, 0.999)).rgb;
+    sum += texture(tex, clamp(uv - blurVec * 1.00, 0.001, 0.999)).rgb;
+
+    return sum * 0.25;
+}
+
+vec3 measuUpscale(sampler2D tex, vec2 uv) {
+    vec2 t = uInternalTexelSize;
+    vec3 c = texture(tex, uv).rgb;
+    if (uGgtuEnabled == 0) return c;
+
+    vec3 n = texture(tex, uv + vec2( 0.0,  t.y)).rgb;
+    vec3 s = texture(tex, uv + vec2( 0.0, -t.y)).rgb;
+    vec3 e = texture(tex, uv + vec2( t.x,  0.0)).rgb;
+    vec3 w = texture(tex, uv + vec2(-t.x,  0.0)).rgb;
+
+    vec3 lumaW = vec3(0.2126, 0.7152, 0.0722);
+
+    float lC = dot(c, lumaW);
+    float lN = dot(n, lumaW), lS = dot(s, lumaW), lE = dot(e, lumaW), lW = dot(w, lumaW);
+
+    float minL = min(lC, min(min(lN, lS), min(lE, lW)));
+    float maxL = max(lC, max(max(lN, lS), max(lE, lW)));
+
+    float contrast = maxL - minL;
+    float sharpWeight = clamp(0.36 * (1.0 - contrast * 1.4), 0.0, 0.28);
+
+    vec3 sharp = c * (1.0 + 4.0 * sharpWeight) - (n + s + e + w) * sharpWeight;
+
+    return clamp(sharp, min(c, min(min(n, s), min(e, w))), max(c, max(max(n, s), max(e, w))));
+}
+
+
 void main() {
 	fragNormal = vec4(0.0);
+
+    if (uMode == 13) {
+        vec2 size = vec2(textureSize(uAccum, 0));
+
+        float depth = texture(uSceneDepth, vSkyUv).r;
+
+        vec3 worldPos = reconstructWorld(vSkyUv, depth);
+
+        vec4 prevClip = prevViewProj * vec4(worldPos, 1.0);
+
+        vec2 warpedUv = clamp((prevClip.xy / max(prevClip.w, 1e-4)) * 0.5 + 0.5, 0.001, 0.999);
+        vec2 velocity = vSkyUv - warpedUv;
+
+        vec3 ac = (uMotionBlurScale > 0.01 && length(velocity) > 0.0015) ? applyMotionBlur(uAccum, warpedUv, velocity) : measuUpscale(uAccum, warpedUv);
+
+        vec3 bloom = texture(uBloomInput, warpedUv).rgb;
+        ac += bloom * uBloomStrength;
+
+        float vig = smoothstep(3.5, 0.8, distance(vSkyUv, vec2(0.5)));
+
+        vig = mix(0.6, 1.0, vig);
+        ac *= vig;
+
+        float exposure = (lightingMode == 1) ? texelFetch(uExposureTex, ivec2(0), 0).r : 1.1;
+
+        vec3 exposed = ac * exposure;
+        vec3 c = (lightingMode == 1) ? mix(aces(exposed), agx(exposed), 0.5) : aces(exposed);
+
+        c = pow(c, vec3(1.0 / 2.2));
+        c = colorGrade(c, sunDir.y);
+
+        fragColor = vec4(c, 1.0);
+        return;
+    }
 
 	if (uMode == 12) {
 		float topLod = float(textureQueryLevels(uLumTex)) - 1.0;
@@ -829,7 +1035,7 @@ void main() {
 		vec2 size = vec2(textureSize(uAccum, 0));
 		vec2 frag = gl_FragCoord.xy;
 
-	    vec3 ac = texture(uAccum, vSkyUv).rgb;
+	    vec3 ac = measuUpscale(uAccum, vSkyUv);
 	    vec3 bloom = texture(uBloomInput, vSkyUv).rgb;
 
 	    ac += bloom * uBloomStrength;
@@ -842,9 +1048,11 @@ void main() {
 
 	    float exposure = (lightingMode == 1) ? texelFetch(uExposureTex, ivec2(0), 0).r : 1.1;
 
-	    vec3 c = aces(ac * exposure);
+        vec3 exposed = ac * exposure;
+	    vec3 c = (lightingMode == 1) ? mix(aces(exposed), agx(exposed), 0.5) : aces(exposed);
 
 	    c = pow(c, vec3(1.0 / 2.2));
+        c = colorGrade(c, sunDir.y);
 
 	    if (uGiDebug == 1 && lightingMode == 1) {
 	    	vec4 nearH = invViewProj * vec4(vSkyUv * 2.0 - 1.0, -1.0, 1.0);
@@ -871,19 +1079,43 @@ void main() {
 		ivec2 px = ivec2(gl_FragCoord.xy);
 
 		vec3 s = texelFetch(uScene, px, 0).rgb;
-		vec3 a = texelFetch(uAccum, px, 0).rgb;
 
 		if (lightingMode == 1) {
 			float ao = texture(uSsaoResult, vSkyUv).r;
 
 			s *= ao;
+            s += computeVolumetricSunRays(vSkyUv, gl_FragCoord.xy);
 		}
 
-		vec3 m = mix(a, s, uBlend);
+		if (uGgtuEnabled == 1) {
+            float depth = texelFetch(uSceneDepth, px, 0).r;
+            
+            vec3 worldPos = reconstructWorld(vSkyUv, depth);
+            vec4 prevClip = prevViewProj * vec4(worldPos, 1.0);
+            vec2 prevUv = (prevClip.xy / max(prevClip.w, 1e-4)) * 0.5 + 0.5;
 
-		fragColor = vec4(m, 1.0);
+            if (prevClip.w > 0.0 && prevUv.x >= 0.0 && prevUv.x <= 1.0 && prevUv.y >= 0.0 && prevUv.y <= 1.0) {
+                vec3 history = texture(uAccum, prevUv).rgb;
 
-		return;
+                float centerAo = (lightingMode == 1) ? texture(uSsaoResult, vSkyUv).r : 1.0;
+
+                vec3 cN = rgbToYCoCg(texelFetch(uScene, px + ivec2( 0,  1), 0).rgb * centerAo);
+                vec3 cS = rgbToYCoCg(texelFetch(uScene, px + ivec2( 0, -1), 0).rgb * centerAo);
+                vec3 cE = rgbToYCoCg(texelFetch(uScene, px + ivec2( 1,  0), 0).rgb * centerAo);
+                vec3 cW = rgbToYCoCg(texelFetch(uScene, px + ivec2(-1,  0), 0).rgb * centerAo);
+                vec3 cC = rgbToYCoCg(s);
+
+                vec3 minC = min(cC, min(min(cN, cS), min(cE, cW)));
+                vec3 maxC = max(cC, max(max(cN, cS), max(cE, cW)));
+                vec3 clampedHistory = yCoCgToRgb(clamp(rgbToYCoCg(history), minC, maxC));
+
+                s = mix(clampedHistory, s, uBlend);
+            }
+        }
+
+        fragColor = vec4(s, 1.0);
+
+        return;
 	}
 	
 	// if (uMode == 3) {
@@ -971,28 +1203,25 @@ void main() {
 
 		color = texColor * lighting;
 	} else {
-		float viewDist = length(vWorldPos - camPos);
-		float dayAmount = smoothstep(-0.15, 0.25, sunDir.y);
-        
-        float contactAo = 1.0;
-        if (viewDist < 48.0) {
-            contactAo = mix(0.45, 1.0, fragAo(vWorldPos, normal) / 3.0);
-        }
+        vec3 viewVec = vWorldPos - camPos;
 
-        vec3 skyAmb = mix(vec3(0.005, 0.01, 0.02), vec3(0.45, 0.55, 0.70), dayAmount);
-        vec3 grdAmb = mix(vec3(0.001, 0.002, 0.005), vec3(0.28, 0.25, 0.22), dayAmount);
-		vec3 ambient = mix(grdAmb, skyAmb, normal.y * 0.5 + 0.5) * contactAo * 0.85;
-		vec3 indirect = (viewDist < 96.0) ? giSample(vWorldPos + normal * (giVoxelSizes[0] * 0.75)) * uGiStrength : skyAmb * 0.25 * uGiStrength;
-        vec3 viewDir = normalize(camPos - vWorldPos);
-        vec3 halfVec = normalize(sunDir + viewDir);
+		float viewDist = length(viewVec);
+		
+        vec3 viewDir = viewVec / max(viewDist, 0.0001);
 
-        float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 5.0);
-        float gloss = (vLayer == 3u) ? 0.45 : (vLayer == 2u) ? 0.18 : 0.06;
-        float specPower = (vLayer == 3u) ? 48.0 : 16.0;
-        float spec = pow(max(dot(normal, halfVec), 0.0), specPower) * gloss;
+        float vertexAo = mix(0.45, 1.0, vAo);
+        float upFactor = normal.y;
 
-        vec3 skyReflect = mix(grdAmb, skyAmb, reflect(-viewDir, normal).y * 0.5 + 0.5);
-        vec3 direct = sunColor * 2.2 * (ndotl + spec) * sunAmount * contactAo;
+        vec3 skyHemisphere = mix(uHorizonColor * 0.45, uSkyColor * 0.65, max(upFactor, 0.0));
+        vec3 groundBounce = uHorizonColor * vec3(0.22, 0.18, 0.14);
+        vec3 ambient = mix(groundBounce, skyHemisphere, smoothstep(-0.6, 0.6, upFactor)) * vertexAo * 0.65;
+        vec3 indirect = (viewDist < 96.0) ? giSample(vWorldPos + normal * (giVoxelSizes[0] * 0.75)) * uGiStrength * vertexAo : skyHemisphere * 0.20 * uGiStrength * vertexAo;
+
+        float wrapNdotL = max((dot(normal, sunDir) + 0.15) / 1.15, 0.0);
+        float sharpNdotL = max(dot(normal, sunDir), 0.0);
+        float diffuse = mix(wrapNdotL, sharpNdotL, 0.75);
+
+        vec3 direct = uSunColor * diffuse * sunAmount;
 
         float sunShadow = 1.0;
 
@@ -1006,7 +1235,21 @@ void main() {
 
         direct *= sunShadow;
 
-		color = texColor * (ambient + direct + indirect) + (skyReflect * fresnel * gloss * sunAmount);
+		color = texColor * (ambient + direct + indirect);
+
+        float fogDist = viewDist * 0.0045;
+        float fogAmt = 1.0 - exp(-pow(fogDist, 1.6));
+        float fogHeight = exp(-max(vWorldPos.y - 40.0, 0.0) * 0.02);
+
+        fogAmt *= mix(0.55, 1.0, fogHeight);
+        fogAmt = clamp(fogAmt, 0.0, 0.92);
+
+        float sunForward = max(dot(viewDir, normalize(sunDir)), 0.0);
+
+        vec3 aerialTint = mix(vec3(0.42, 0.56, 0.74), vec3(0.95, 0.78, 0.55), pow(sunForward, 4.0) * 0.8);
+        vec3 fogColor = mix(aerialTint, uSkyColor * 0.9, 0.35) + uSunColor * pow(sunForward, 6.0) * 0.25;
+
+        color = mix(color, fogColor, fogAmt);
 	}
 
 	if (vFace == 6u) {

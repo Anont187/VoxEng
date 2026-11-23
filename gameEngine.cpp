@@ -68,6 +68,11 @@ float baseSensitivity = 0.071f;
 float bfov = 70.0f;
 float zoomFov = 10.0f;
 float zoomSensitivity = 0.015f;
+float maxZoomFov = 70.0f;
+float zoomZoomRate = 42.0f;
+float zoomZoomAccel = 140.0f;
+float wideFov = 70.0f;
+float motionBlurScale = 0.55f;
 
 float dayLengthSec = 360.0f;
 
@@ -95,6 +100,7 @@ int cascadeRays[3] = { 4, 8, 16 };
 int cascadeVoxels[3] = { 32 * 32 * 32, 16 * 16 * 16, 8 * 8 * 8 };
 int cascadeOffsets[3] = { 0, 32768, 36864 };
 int totalGiVoxels = giCascades * giVoxelsPerCascade;
+int frameGenAmount = 1;
 
 bool giDirty = true;
 
@@ -385,7 +391,7 @@ void addFace(chunkMesh& mesh, const glm::vec3& a, const glm::vec3& b, const glm:
 	mesh.indices.push_back(base + 0);
 }
 
-void addGreedyQuad(chunkMesh& mesh, int axis, int8_t value, int slice, int uStart, int vStart, int width, int height, const glm::vec3& chunkOffset) {
+void addGreedyQuad(chunkMesh& mesh, int axis, int8_t value, int slice, int uStart, int vStart, int width, int height, const glm::vec3& chunkOffset,  uint8_t ao00, uint8_t ao10, uint8_t ao11, uint8_t ao01) {
 	glm::vec3 p0(0.0f);
 	glm::vec3 pu(0.0f);
 	glm::vec3 pv(0.0f);
@@ -442,9 +448,9 @@ void addGreedyQuad(chunkMesh& mesh, int axis, int8_t value, int slice, int uStar
 	}
 
 	if (signDir > 0) {
-		addFace(mesh, p0, pu, puv, pv, layer, face8, uvW, uvH, 255, 255, 255, 255);
+		addFace(mesh, p0, pu, puv, pv, layer, face8, uvW, uvH, ao00, ao10, ao11, ao01);
 	} else {
-		addFace(mesh, p0, pv, puv, pu, layer, face8, uvH, uvW, 255, 255, 255, 255);
+		addFace(mesh, p0, pv, puv, pu, layer, face8, uvH, uvW, ao00, ao01, ao11, ao10);
 	}
 }
 
@@ -602,7 +608,45 @@ chunkMesh buildChunkMesh(chunkMesh& out, const Chunk& chunk, int chunkX, int chu
 
                     int plane = slice + 1;
 
-                    addGreedyQuad(out, axis, value, plane, u, v, width, height, chunkOffset);
+                    auto sampleSolid = [&](int x, int y, int z) -> int {
+                    	int outsideAxes = (x < 0 || x >= chunkSize) + (y < 0 || y >= chunkSize) + (z < 0 || z >= chunkSize);
+                    	if (outsideAxes > 1) return 0;
+					    if (x >= 0 && x < chunkSize && y >= 0 && y < chunkSize && z >= 0 && z < chunkSize) return getVoxel(chunk, x, y, z) != 0 ? 1 : 0;
+					    if (x < 0)          return (negX && getVoxel(*negX, x + chunkSize, y, z) != 0) ? 1 : 0;
+					    if (x >= chunkSize) return (posX && getVoxel(*posX, x - chunkSize, y, z) != 0) ? 1 : 0;
+					    if (z < 0)          return (negZ && getVoxel(*negZ, x, y, z + chunkSize) != 0) ? 1 : 0;
+					    if (z >= chunkSize) return (posZ && getVoxel(*posZ, x, y, z - chunkSize) != 0) ? 1 : 0;
+					    if (y < 0)          return (negY && getVoxel(*negY, x, y + chunkSize, z) != 0) ? 1 : 0;
+					    if (y >= chunkSize) return (posY && getVoxel(*posY, x, y - chunkSize, z) != 0) ? 1 : 0;
+
+					    return 0;
+					};
+
+					auto cornerAo = [&](int uPos, int vPos, int du, int dv) -> uint8_t {
+					    int airSlice = (value > 0) ? (slice + 1) : slice;
+					    int p1[3] = {0, 0, 0}, p2[3] = {0, 0, 0}, pc[3] = {0, 0, 0};
+
+					    p1[axis] = p2[axis] = pc[axis] = airSlice;
+					    p1[uAxis] = uPos + du; p1[vAxis] = vPos;
+					    p2[uAxis] = uPos;      p2[vAxis] = vPos + dv;
+					    pc[uAxis] = uPos + du; pc[vAxis] = vPos + dv;
+
+					    int s1 = sampleSolid(p1[0], p1[1], p1[2]);
+					    int s2 = sampleSolid(p2[0], p2[1], p2[2]);
+					    int sc = sampleSolid(pc[0], pc[1], pc[2]);
+					    int occ = (s1 && s2) ? 0 : (3 - (s1 + s2 + sc));
+
+					    const uint8_t lut[4] = { 115, 165, 210, 255 };
+
+					    return lut[occ];
+					};
+
+					uint8_t ao00 = cornerAo(u, v, - 1, - 1);
+					uint8_t ao10 = cornerAo(u + width, v, + 1, - 1);
+					uint8_t ao11 = cornerAo(u + width, v + height, + 1, + 1);
+					uint8_t ao01 = cornerAo(u, v + height, - 1, + 1);
+
+                    addGreedyQuad(out, axis, value, plane, u, v, width, height, chunkOffset, ao00, ao10, ao11, ao01);
 
                     for (int y = 0; y < height; y++) {
                         for (int x = 0; x < width; x++) {
@@ -1017,20 +1061,50 @@ void processInput(GLFWwindow* window, float deltaTime, glm::vec3& camPos, glm::v
 
     float tfov;
 
-    if (glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS) {
-    	tfov = zoomFov;
+    bool zoomIn = glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
+    bool zoomOut = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
+    bool zoomReset = glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS;
 
-    	sensitivity = zoomSensitivity;
+    static float zoomSpeedDegPerSec = 0.0f;
+
+    if (zoomReset && !zoomIn && !zoomOut) {
+        float diff = bfov - cfov;
+        float resetSpeed = zoomZoomRate * 1.6f;
+
+        if (std::fabs(diff) <= 0.05f) {
+            cfov = bfov;
+
+            zoomSpeedDegPerSec = 0.0f;
+        } else {
+            float dir = (diff > 0.0f) ? 1.0f : -1.0f;
+
+            zoomSpeedDegPerSec = dir * std::min(resetSpeed, std::fabs(diff) / std::max(deltaTime, 1e-4f));
+
+            cfov += zoomSpeedDegPerSec * deltaTime;
+        }
     } else {
-    	tfov = bfov;
+        float zoomInput = 0.0f;
+        if (zoomIn && !zoomOut) {
+            zoomInput = 1.0f;
+        } else if (zoomOut && !zoomIn) {
+            zoomInput = -1.0f;
+        }
 
-    	sensitivity = baseSensitivity;
+        float targetSpeed = -zoomInput * zoomZoomRate;
+        float speedDelta = targetSpeed - zoomSpeedDegPerSec;
+        float maxStep = zoomZoomAccel * deltaTime;
+
+        if (std::fabs(speedDelta) <= maxStep) {
+            zoomSpeedDegPerSec = targetSpeed;
+        } else {
+            zoomSpeedDegPerSec += (speedDelta > 0.0f ? 1.0f : -1.0f) * maxStep;
+        }
+
+        cfov += zoomSpeedDegPerSec * deltaTime;
     }
 
-    cfov += (tfov - cfov) * 10.0f * deltaTime;
-
     if (cfov < 1.0f) cfov = 1.0f;
-    if (cfov > 90.0f) cfov = 90.0f;
+    if (cfov > 70.0f) cfov = 70.0f;
 
     bool spacePressed = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
     bool justToggledFly = false;
@@ -1838,7 +1912,11 @@ int main() {
     baseSensitivity = setting("baseSensitivity", baseSensitivity);
     bfov = setting("bfov", bfov);
     zoomFov = setting("zoomFov", zoomFov);
+    wideFov = setting("wideFov", wideFov);
     zoomSensitivity = setting("zoomSensitivity", zoomSensitivity);
+    maxZoomFov = setting("maxZoomFov", bfov);
+    zoomZoomRate = setting("zoomZoomRate", zoomZoomRate);
+    zoomZoomAccel = setting("zoomZoomAccel", zoomZoomAccel);
     dayLengthSec = setting("dayLengthSec", dayLengthSec);
     renderScale = setting("renderScale", renderScale);
     gravity = setting("gravity", gravity);
@@ -1858,6 +1936,10 @@ int main() {
 	cascadeRays[1] = (int)setting("cascadeRays1", (float)cascadeRays[1]);
 	cascadeRays[2] = (int)setting("cascadeRays2", (float)cascadeRays[2]);
 	totalGiVoxels = giCascades * giVoxelsPerCascade;
+	frameGenAmount = std::max(1, (int)setting("frameGenAmount", (float)frameGenAmount));
+	motionBlurScale = setting("motionBlurScale", motionBlurScale);
+
+	std::cout << "\nGI CONFIGURATION\n" << "Dimension: " << giDim << '\n' << "Cascades: " << giCascades << '\n' << "Voxels per cascade: " << giVoxelsPerCascade << '\n' << "Total voxels: " << totalGiVoxels << "\n\n" << std::flush;
 
 	for (int i = 0; i < 3; i++) cascadeDims[i] = giDim;
 
@@ -2088,6 +2170,9 @@ int main() {
  
     glVertexAttribPointer(3, 1, GL_UNSIGNED_BYTE, GL_FALSE, sizeof(vertex), (void*)offsetof(vertex, face));
     glEnableVertexAttribArray(3);
+
+    glVertexAttribPointer(4, 1, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(vertex), (void*)offsetof(vertex, ao));
+	glEnableVertexAttribArray(4);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
@@ -2445,16 +2530,23 @@ int main() {
     GLint aeFloorLoc = glGetUniformLocation(shaderProgram, "uAutoExposureFloor");
     GLint exposureMinLoc = glGetUniformLocation(shaderProgram, "uExposureMin");
     GLint exposureMaxLoc = glGetUniformLocation(shaderProgram, "uExposureMax");
+    GLint sunColorLoc = glGetUniformLocation(shaderProgram, "uSunColor");
+	GLint skyColorLoc = glGetUniformLocation(shaderProgram, "uSkyColor");
+	GLint horizonColorLoc = glGetUniformLocation(shaderProgram, "uHorizonColor");
+	GLint sunScreenUVLoc = glGetUniformLocation(shaderProgram, "uSunScreenUV");
+	GLint sunVisibleLoc = glGetUniformLocation(shaderProgram, "uSunVisible");
+	GLint giDimShaderLoc = glGetUniformLocation(shaderProgram, "uGiDim");
+	GLint prevViewProjLoc = glGetUniformLocation(shaderProgram, "prevViewProj");
+	GLint internalTexelLoc = glGetUniformLocation(shaderProgram, "uInternalTexelSize");
+	GLint ggtuEnabledLoc = glGetUniformLocation(shaderProgram, "uGgtuEnabled");
+	GLint motionBlurLoc = glGetUniformLocation(shaderProgram, "uMotionBlurScale");
 
     std::cout << "STARTUP: Made LOOKUP locations for glUniform\n" << std::flush;
 
-    GLint giStageLoc = glGetUniformLocation(computeProgram, "uStage");
-	GLint giReadALoc = glGetUniformLocation(computeProgram, "uReadA");
 	GLint giCascadeLoc = glGetUniformLocation(computeProgram, "uCascadeIndex");
 	GLint giSunDirLoc = glGetUniformLocation(computeProgram, "uSunDir");
-	GLint giPackFromALoc = glGetUniformLocation(computeProgram, "uPackFromA");
 	GLint frameIndexLoc = glGetUniformLocation(computeProgram, "uFrameIndex");
-	GLint giDimLoc = glGetUniformLocation(computeProgram, "uGiDim");
+	GLint giDimComputeLoc = glGetUniformLocation(computeProgram, "uGiDim");
 	GLint girayCountLoc = glGetUniformLocation(computeProgram, "uRayCount");
 	GLint giOriginsCLoc = glGetUniformLocation(computeProgram, "giOrigins");
 	GLint giVoxelSizesCLoc = glGetUniformLocation(computeProgram, "giVoxelSizes");
@@ -2711,7 +2803,11 @@ int main() {
 		}
 	};
 
+	std::cout << "STARTUP: Before initial rebuildChunks();\n" << std::flush;
+
 	rebuildChunks();
+
+	std::cout << "STARTUP: After initial rebuildChunks();\n" << "Chunks: " << chunks.size() << '\n' << "Meshes: " << meshCache.size() << '\n' << "Commands: " << commands.size() << '\n' << std::flush;
 
 	for (size_t i = 0; i < commands.size() && i < 3; i++) {
     	std::cout << "cmd " << i
@@ -2729,7 +2825,7 @@ int main() {
 	glUniform1i(brickDimXLoc, brickDimX);
 	glUniform1i(brickDimYLoc, brickDimY);
 	glUniform1i(brickDimZLoc, brickDimZ);
-	glUniform1i(giDimLoc, giDim);
+	glUniform1i(giDimShaderLoc, giDim);
 
 	glUniform1f(ssaoRadiusLoc, setting("ssaoRadius", 2.5f));
 	glUniform1f(ssaoBiasLoc, setting("ssaoBias", 0.003f));
@@ -2856,13 +2952,15 @@ int main() {
         setting("giVoxelSize2", 32.0f)
     };
 
-    GLuint svoSsbo;
+    GLuint svoSsbo = 0;
 
     glGenBuffers(1, &svoSsbo);
 
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, svoSsbo);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(svoNodeCpu), nullptr, GL_DYNAMIC_DRAW);
 
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svoSsbo);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
    	glUniform1i(glGetUniformLocation(shaderProgram, "uGiDebug"), (int)setting("giDebug", 0.0f));
 
@@ -2870,10 +2968,23 @@ int main() {
    	glUniform1f(exposureMinLoc, setting("exposureMin", 0.1f));
    	glUniform1f(exposureMaxLoc, setting("exposureMax", 1.0f));
 
+   	std::cout << "gi SSBO alloc complete\n" << std::flush;
+
+   	GLenum err = glGetError();
+
+   	if (err != GL_NO_ERROR) {
+   		std::cout << "gi alloc GL error: " << std::hex << err << std::dec << '\n';
+   	}
+
 	std::cout << "STARTUP: EOF\n" << std::flush;
 
 	while (!glfwWindowShouldClose(window)) {
 		time = glfwGetTime();
+
+		static GLuint visible = 0;
+		static GLuint total = 0;
+		static GLuint triangles = 0;
+
 
 		float deltaTime = static_cast<float>(time - lastFrame);
 
@@ -3002,41 +3113,133 @@ int main() {
 		glBindTexture(GL_TEXTURE_2D, 0);
 		glBindRenderbuffer(GL_RENDERBUFFER, 0);
 
-		glm::mat4 projection = glm::perspective(glm::radians(cfov), static_cast<float>(width) / static_cast<float>(height), 0.1f, 800.0f);
+		static bool ggtuEnabled = true;
+		static bool gWasDown = false;
+
+		bool gDown = glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS;
+		if (gDown && !gWasDown) {
+			ggtuEnabled = !ggtuEnabled;
+
+			accumFrame = 0;
+
+			std::cout << "DEBUG: GGTU (aka TAA + MEASU + Motion blur) = " << (ggtuEnabled ? "ON" : "OFF") << "\n";
+		}
+
+		gWasDown = gDown;
+
+		static int frameSubIdx = 0;
+
+		bool isGeneratedFrame = (frameGenAmount > 1) && (frameSubIdx > 0);
+
+		frameSubIdx = (frameSubIdx + 1) % frameGenAmount;
+
+		static const glm::vec2 halton8[8] = {
+			{0.5000f, 0.3333f}, {0.2500f, 0.6667f}, {0.7500f, 0.1111f}, {0.1250f, 0.4444f},
+    		{0.6250f, 0.7778f}, {0.3750f, 0.2222f}, {0.8750f, 0.5556f}, {0.0625f, 0.8889f}
+		};
+
+		glm::mat4 baseProjection = glm::perspective(glm::radians(cfov), static_cast<float>(width) / static_cast<float>(height), 0.1f, 800.0f);
+		glm::mat4 projection = baseProjection;
+		if (ggtuEnabled && !isGeneratedFrame) {
+			glm::vec2 jitter = (halton8[accumFrame & 7] - 0.5f) * 2.0f;
+
+			projection[2][0] += jitter.x / static_cast<float>(pastWidth);
+			projection[2][1] += jitter.y / static_cast<float>(pastHeight);
+		}
+
 		glm::mat4 view = glm::lookAt(camPos, camPos + camFront, up);
+		glm::mat4 currVp = projection * view;
+		glm::mat4 currBaseVp = baseProjection * view;
+
+		static glm::mat4 prevVp = currVp;
+		static glm::mat4 prevBaseVp = baseProjection * view;
+
 		glm::mat4 model(1.0f);
-		glm::mat4 mvp = projection * view * model;
-		glm::mat4 invVp = glm::inverse(projection * view);
+		glm::mat4 mvp = currVp * model;
+		glm::mat4 invVp = glm::inverse(currVp);
 
-		glUniformMatrix4fv(viewProjLoc, 1, GL_FALSE, glm::value_ptr(projection * view));
+		glUseProgram(shaderProgram);
 
-		static float smoothedBlend = 1.0f;
-		static glm::vec3 lastPos = camPos + glm::vec3(1e6f);
-		static glm::vec3 lastFront = camFront;
-		static float lastFov = cfov;
-		static glm::vec3 lastSunDir = sunDir;
+		glUniformMatrix4fv(viewProjLoc, 1, GL_FALSE, glm::value_ptr(currVp));
+		glUniformMatrix4fv(prevViewProjLoc, 1, GL_FALSE, glm::value_ptr(prevVp));
 
-		glm::vec3 dp = camPos - lastPos;
-		glm::vec3 df = camFront - lastFront;
-		glm::vec3 ds = sunDir - lastSunDir;
+		glUniform2f(internalTexelLoc, 1.0f / static_cast<float>(pastWidth), 1.0f / static_cast<float>(pastHeight));
 
-		bool moved = glm::dot(dp, dp) > 1e-6f || glm::dot(df, df) > 1e-8f || std::abs(cfov - lastFov) > 1e-4f;
+		glUniform1i(ggtuEnabledLoc, ggtuEnabled ? 1 : 0);
 
-		lastPos = camPos;
-		lastFront = camFront;
-		lastFov = cfov;
-		lastSunDir = sunDir;
+		glUniform1f(motionBlurLoc, motionBlurScale);
 
-		float targetBlend = moved ? 1.0f : 0.12f;
-		// float k = (targetBlend > smoothedBlend) ? 0.6f : 0.15f;
+		if (!isGeneratedFrame) {
+			accumFrame++;
+		}
 
-		smoothedBlend = moved ? 1.0f : smoothedBlend + (targetBlend - smoothedBlend) * 0.15f;
-
-		accumFrame++;
-
-		float blend = smoothedBlend;
+		float blend = ggtuEnabled ? 0.14f : 1.0f;
 
 		glUniform3f(sunDirLoc, sunDir.x, sunDir.y, sunDir.z);
+
+		static int lightingMode = 0;
+
+		glm::vec3 sunColor(1.0f, 0.96f, 0.90f);
+		glm::vec3 skyColor(0.36f, 0.64f, 1.00f);
+		glm::vec3 horizonColor(0.68f, 0.84f, 1.00f);
+		glm::vec2 sunScreenUV(0.5f);
+
+		float sunVisible = 0.0f;
+
+		if (lightingMode == 1) {
+			float sunH = sunDir.y;
+			float nightMask  = glm::smoothstep(0.02f, -0.18f, sunH);
+			float blueMask   = glm::clamp(1.0f - std::abs(sunH + 0.05f) / 0.12f, 0.0f, 1.0f);
+			float goldenMask = glm::clamp(1.0f - std::abs(sunH - 0.08f) / 0.16f, 0.0f, 1.0f);
+			float noonMask   = glm::smoothstep(0.15f, 0.75f, sunH);
+
+			glm::vec3 moonLight   = glm::vec3(0.06f, 0.10f, 0.22f);
+			glm::vec3 goldenLight = glm::vec3(3.20f, 1.15f, 0.35f);
+			glm::vec3 noonLight   = glm::vec3(4.50f, 4.25f, 3.90f);
+
+			sunColor = glm::mix(goldenLight, noonLight, noonMask);
+			sunColor = glm::mix(sunColor, goldenLight, goldenMask * 0.75f);
+			sunColor = glm::mix(sunColor, moonLight, nightMask);
+
+			glm::vec3 nightZenith  = glm::vec3(0.008f, 0.015f, 0.035f);
+			glm::vec3 blueZenith   = glm::vec3(0.06f,  0.16f,  0.42f);
+			glm::vec3 goldenZenith = glm::vec3(0.18f,  0.34f,  0.68f);
+			glm::vec3 noonZenith   = glm::vec3(0.22f,  0.52f,  1.15f);
+
+			skyColor = glm::mix(goldenZenith, noonZenith, noonMask);
+			skyColor = glm::mix(skyColor, blueZenith, blueMask);
+			skyColor = glm::mix(skyColor, nightZenith, nightMask);
+
+			glm::vec3 nightHorizon  = glm::vec3(0.012f, 0.022f, 0.048f);
+			glm::vec3 blueHorizon   = glm::vec3(0.28f,  0.32f,  0.55f);
+			glm::vec3 goldenHorizon = glm::vec3(1.45f,  0.58f,  0.22f);
+			glm::vec3 noonHorizon   = glm::vec3(0.65f,  0.82f,  1.05f);
+
+			horizonColor = glm::mix(goldenHorizon, noonHorizon, noonMask);
+			horizonColor = glm::mix(horizonColor, goldenHorizon, goldenMask * 0.85f);
+			horizonColor = glm::mix(horizonColor, blueHorizon, blueMask);
+			horizonColor = glm::mix(horizonColor, nightHorizon, nightMask);
+
+			glm::vec4 sunClip = projection * view * glm::vec4(camPos + sunDir * 500.0f, 1.0f);
+			if (sunClip.w > 0.0f) {
+				glm::vec2 ndc = glm::vec2(sunClip.x, sunClip.y) / sunClip.w;
+				sunScreenUV = ndc * 0.5f + 0.5f;
+
+				float edgeX = std::min(sunScreenUV.x, 1.0f - sunScreenUV.x);
+				float edgeY = std::min(sunScreenUV.y, 1.0f - sunScreenUV.y);
+				float edgeFade = glm::clamp(std::min(edgeX, edgeY) / 0.08f, 0.0f, 1.0f);
+
+				sunVisible = edgeFade * glm::clamp(sunH * 4.0f + 0.2f, 0.0f, 1.0f);
+			}
+		}
+
+		glUniform3fv(sunColorLoc, 1, glm::value_ptr(sunColor));
+		glUniform3fv(skyColorLoc, 1, glm::value_ptr(skyColor));
+		glUniform3fv(horizonColorLoc, 1, glm::value_ptr(horizonColor));
+
+		glUniform2fv(sunScreenUVLoc, 1, glm::value_ptr(sunScreenUV));
+
+		glUniform1f(sunVisibleLoc, sunVisible);
 
 		int newChunkX = static_cast<int>(std::floor(camPos.x / static_cast<float>(chunkSize)));
 		int newChunkY = static_cast<int>(std::floor(camPos.y / static_cast<float>(chunkSize)));
@@ -3059,9 +3262,11 @@ int main() {
 		    uploadBrickTbo();
 
 		    std::vector<svoNodeCpu> currentSvo = buildCpuSvo(chunks, playerChunkX, playerChunkY, playerChunkZ);
-
-		    glBindBuffer(GL_SHADER_STORAGE_BUFFER, svoSsbo);
-		    glBufferData(GL_SHADER_STORAGE_BUFFER, currentSvo.size() * sizeof(svoNodeCpu), currentSvo.data(), GL_DYNAMIC_DRAW);
+		    if (!currentSvo.empty()) {
+		        glBindBuffer(GL_SHADER_STORAGE_BUFFER, svoSsbo);
+		        glBufferData(GL_SHADER_STORAGE_BUFFER, currentSvo.size() * sizeof(svoNodeCpu), currentSvo.data(), GL_DYNAMIC_DRAW);
+		        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+		    }
 
 		    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
@@ -3072,7 +3277,6 @@ int main() {
 			chunksNeedUpdate = false;
 		}
 
-		static int lightingMode = 0;
 		static bool tabWasDown = false;
 
 		bool tabDown = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
@@ -3101,265 +3305,344 @@ int main() {
 
 		tabWasDown = tabDown;
 
-		if (lightingMode == 1) {
-            const int px = (int)std::floor(camPos.x);
-            const int py = (int)std::floor(camPos.y);
-            const int pz = (int)std::floor(camPos.z);
+		if (!isGeneratedFrame) {
+			if (lightingMode == 1) {
+	            const int px = (int)std::floor(camPos.x);
+	            const int py = (int)std::floor(camPos.y);
+	            const int pz = (int)std::floor(camPos.z);
 
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, giVoxelSsbo);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, giBaseSsbo);
+	            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
+	            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, giVoxelSsbo);
+	            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, giBaseSsbo);
 
-            glUseProgram(computeProgram);
+	            glUseProgram(computeProgram);
 
-            glUniform3f(giSunDirLoc, sunDir.x, sunDir.y, sunDir.z);
+	            glUniform3f(giSunDirLoc, sunDir.x, sunDir.y, sunDir.z);
 
-            glUniform1i(frameIndexLoc, accumFrame);
+	            glUniform1i(frameIndexLoc, accumFrame);
 
-            for (int c = 0; c < giCascades; c++) {
-            	int vs = (int)giVoxelSizeArr[c];
-            	int half = giDim * vs / 2;
-            	int maxY = std::max(0, worldHeight - giDim * vs);
+	            for (int c = 0; c < giCascades; c++) {
+	            	int vs = (int)giVoxelSizeArr[c];
+	            	int half = giDim * vs / 2;
+	            	int maxY = std::max(0, worldHeight - giDim * vs);
 
-            	glm::ivec3 want(floorDiv(px - half, vs) * vs, std::clamp(py - half, 0, maxY), floorDiv(pz - half, vs) * vs);
+	            	glm::ivec3 want(floorDiv(px - half, vs) * vs, std::clamp(py - half, 0, maxY), floorDiv(pz - half, vs) * vs);
 
-            	bool moved = std::abs(want.x - giOrigin[c].x) >= vs * 16 || std::abs(want.y - giOrigin[c].y) >= vs * 16 || std::abs(want.z - giOrigin[c].z) >= vs * 16;
-            	if (giDirty || moved) {
-            		giOrigin[c] = want;
+	            	bool moved = std::abs(want.x - giOrigin[c].x) >= vs * 16 || std::abs(want.y - giOrigin[c].y) >= vs * 16 || std::abs(want.z - giOrigin[c].z) >= vs * 16;
+	            	if (giDirty || moved) {
+	            		giOrigin[c] = want;
 
-            		giBuildVoxelTypes(chunks, giOrigin[c], vs, giVoxelCache[c]);
+	            		giBuildVoxelTypes(chunks, giOrigin[c], vs, giVoxelCache[c]);
 
-            		glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
-            		glBufferSubData(GL_SHADER_STORAGE_BUFFER, c * voxelBytes, voxelBytes, giVoxelCache[c].data());
-            	}
-            }
+	            		glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
+	            		glBufferSubData(GL_SHADER_STORAGE_BUFFER, c * voxelBytes, voxelBytes, giVoxelCache[c].data());
+	            	}
+	            }
 
-            giDirty = false;
+	            giDirty = false;
 
-            glUniform3iv(giOriginsCLoc, giCascades, (const GLint*)giOrigin);
+	            glUniform3iv(giOriginsCLoc, giCascades, (const GLint*)giOrigin);
 
-            glUniform1fv(giVoxelSizesCLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
+	            glUniform1fv(giVoxelSizesCLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
 
-            for (int c = giCascades - 1; c >= 0; c--) {
-            	int dim = cascadeDims[c];
+	            for (int c = giCascades - 1; c >= 0; c--) {
+	            	int dim = cascadeDims[c];
 
-            	glUniform1i(giCascadeLoc, c);
-            	glUniform1i(giDimLoc, dim);
-            	glUniform1i(girayCountLoc, cascadeRays[c]);
+	            	glUniform1i(giCascadeLoc, c);
+	            	glUniform1i(giDimComputeLoc, dim);
+	            	glUniform1i(girayCountLoc, cascadeRays[c]);
 
-            	glDispatchCompute(dim / 4, dim / 4, dim / 4);
-            	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-            }
+	            	glDispatchCompute(dim / 4, dim / 4, dim / 4);
+	            	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+	            }
 
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+	            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
-            glUseProgram(shaderProgram);
+	            glUseProgram(shaderProgram);
 
-            glUniform3iv(giOriginsLoc, giCascades, (const GLint*)giOrigin);
+	            glUniform3iv(giOriginsLoc, giCascades, (const GLint*)giOrigin);
 
-            glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
-        }
-
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
-		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svoSsbo);
-
-		glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
-		glViewport(0, 0, pastWidth, pastHeight);
-
-		glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-		glDisable(GL_DEPTH_TEST);
-		glDepthMask(GL_FALSE);
-
-		glUseProgram(shaderProgram);
-		glUniform1i(uModeLoc, 2);
-		glUniform1i(lightingModeLoc, lightingMode);
-
-		glActiveTexture(GL_TEXTURE1);
-		glBindTexture(GL_TEXTURE_BUFFER, voxelTboTex);
-		glUniform1i(voxelTboLoc, 1);
-
-		glActiveTexture(GL_TEXTURE2);
-		glBindTexture(GL_TEXTURE_BUFFER, brickTboTex);
-		glUniform1i(brickTboLoc, 2);
-
-		glUniform1i(rmPlayerXLoc, playerChunkX);
-		glUniform1i(rmPlayerZLoc, playerChunkZ);
-		glUniform1i(rmPlayerYLoc, playerChunkY);
-		glUniform1i(frameIdxLoc, accumFrame);
-
-		glUniform2fv(ssgiOffsetsLoc, (GLsizei)ssgiOffsets.size(), (const GLfloat*)ssgiOffsets.data());
-
-		glm::mat4 skyIdentity(1.0f);
-
-		glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(skyIdentity));
-
-		glUniformMatrix4fv(invViewProjLoc, 1, GL_FALSE, glm::value_ptr(invVp));
-
-		glUniform3f(camPosLoc, camPos.x, camPos.y, camPos.z);
-
-		glUniform1f(timeOfDayLoc, timeOfDay);
-
-		float skyQuad[] = {
-			-1, -1, 0, 1, -1, 0, 1, 1, 0,
-			-1, -1, 0, 1, 1, 0, -1, 1, 0
-		};
-
-		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-
-		glBindVertexArray(lineVao);
-
-		glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-		glBufferData(GL_ARRAY_BUFFER, sizeof(skyQuad), nullptr, GL_STREAM_DRAW);
-		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(skyQuad), skyQuad);
-		glDrawArrays(GL_TRIANGLES, 0, 6);
-
-		glEnable(GL_DEPTH_TEST);
-		glDepthMask(GL_TRUE);
-
-		if (goWireFrame) {
-		    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-		} else {
-		    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-		}
-
-		frustum Frustum = extractFrustum(projection * view);
-
-		vis.clear();
-		vis.reserve(commands.size());
-
-		for (const auto& cmd : commands) {
-			if (!aabbInFrustum(Frustum, cmd.aabbMin, cmd.aabbMax)) continue;
-
-			glm::vec3 center = (cmd.aabbMin + cmd.aabbMax) * 0.5f;
-			glm::vec3 d = center - camPos;
-
-			vis.push_back({
-				&cmd,
-				glm::dot(d, d)
-			});
-		}
-
-		std::sort(vis.begin(), vis.end(), [](const visCmd& a, const visCmd& b){
-			return a.distSq < b.distSq;
-		});
-
-		mdCounts.clear();
-		mdIndices.clear();
-
-		for (const auto& v : vis) {
-			mdCounts.push_back(static_cast<GLsizei>(v.cmd->count));
-			mdIndices.push_back(reinterpret_cast<const void*>(static_cast<uintptr_t>(v.cmd->firstIndex)));
-		}
-
-		glUseProgram(shaderProgram);
-
-		glUniform1i(uModeLoc, 0);
-
-		glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
-
-		// glEnable(GL_BLEND);
-		// glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-		glBindVertexArray(vao);
-
-		if (!mdCounts.empty()) {
-			glMultiDrawElements(GL_TRIANGLES, mdCounts.data(), GL_UNSIGNED_INT, mdIndices.data(), static_cast<GLsizei>(mdCounts.size()));
-
-			GLsync frameFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-
-			for (const auto& v : vis) {
-				uint64_t k = chunkKey(v.cmd->aabbMin.x / chunkSize, v.cmd->aabbMin.y / chunkSize, v.cmd->aabbMin.z / chunkSize);
-
-				auto it = chunkSlots.find(k);
-				if (it != chunkSlots.end()) {
-					uint32_t slot = it->second;
-
-					if (slotFences[slot] != nullptr) {
-						glDeleteSync(slotFences[slot]);
-					}
-
-					slotFences[slot] = frameFence;
-				}
-			}
-		}
-
-		glBindVertexArray(0);
-
-		glDisable(GL_BLEND);
-
-		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-
-		if (hasHightlight) {
-			float e = 0.002f;
-	        float x0 = (float)highlightHit.x - e;
-	        float x1 = (float)highlightHit.x + 1.0f + e;
-	        float y0 = (float)highlightHit.y - e;
-	        float y1 = (float)highlightHit.y + 1.0f + e;
-	        float z0 = (float)highlightHit.z - e;
-	        float z1 = (float)highlightHit.z + 1.0f + e;
-	        float corners[8][3] = {
-	            {x0,y0,z0}, {x1,y0,z0}, {x1,y0,z1}, {x0,y0,z1},
-	            {x0,y1,z0}, {x1,y1,z0}, {x1,y1,z1}, {x0,y1,z1}
-	        };
- 
-	        int edges[12][2] = {
-	            {0,1},{1,2},{2,3},{3,0},
-	            {4,5},{5,6},{6,7},{7,4},
-	            {0,4},{1,5},{2,6},{3,7}
-	        };
- 
-	        float verts[72];
- 
-	        int vi = 0;
- 
-	        for (int k = 0; k < 12; k++) {
-		       	for (int j = 0; j < 2; j++) {
-		       		int c = edges[k][j];
-
-		       		verts[vi++] = corners[c][0];
-		       		verts[vi++] = corners[c][1];
-		       		verts[vi++] = corners[c][2];
-		       	}
+	            glUniform1fv(giVoxelSizesLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
 	        }
 
-	        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
+	        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, giSsbo);
+			glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, svoSsbo);
 
-			glUniform4f(uColorLoc, 0.0f, 0.0f, 0.0f, 1.0f);
+			glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo);
+			glViewport(0, 0, pastWidth, pastHeight);
+
+			glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			glDisable(GL_DEPTH_TEST);
+			glDepthMask(GL_FALSE);
+
+			glUseProgram(shaderProgram);
+			glUniform1i(uModeLoc, 2);
+			glUniform1i(lightingModeLoc, lightingMode);
+
+			glActiveTexture(GL_TEXTURE1);
+			glBindTexture(GL_TEXTURE_BUFFER, voxelTboTex);
+			glUniform1i(voxelTboLoc, 1);
+
+			glActiveTexture(GL_TEXTURE2);
+			glBindTexture(GL_TEXTURE_BUFFER, brickTboTex);
+			glUniform1i(brickTboLoc, 2);
+
+			glUniform1i(rmPlayerXLoc, playerChunkX);
+			glUniform1i(rmPlayerZLoc, playerChunkZ);
+			glUniform1i(rmPlayerYLoc, playerChunkY);
+			glUniform1i(frameIdxLoc, accumFrame);
+
+			glUniform2fv(ssgiOffsetsLoc, (GLsizei)ssgiOffsets.size(), (const GLfloat*)ssgiOffsets.data());
+
+			glm::mat4 skyIdentity(1.0f);
+
+			glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(skyIdentity));
+
+			glUniformMatrix4fv(invViewProjLoc, 1, GL_FALSE, glm::value_ptr(invVp));
+
+			glUniform3f(camPosLoc, camPos.x, camPos.y, camPos.z);
+
+			glUniform1f(timeOfDayLoc, timeOfDay);
+
+			float skyQuad[] = {
+				-1, -1, 0, 1, -1, 0, 1, 1, 0,
+				-1, -1, 0, 1, 1, 0, -1, 1, 0
+			};
+
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
 			glBindVertexArray(lineVao);
 
 			glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(verts), nullptr, GL_STREAM_DRAW);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(skyQuad), nullptr, GL_STREAM_DRAW);
+			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(skyQuad), skyQuad);
+			glDrawArrays(GL_TRIANGLES, 0, 6);
 
-			glLineWidth(1.0f);
-			glDrawArrays(GL_LINES, 0, 24);
-		}
+			glEnable(GL_DEPTH_TEST);
+			glDepthMask(GL_TRUE);
 
-		{
-			GLuint visible = static_cast<GLuint>(mdCounts.size());
-			GLuint total = static_cast<GLuint>(commands.size());
-			GLuint triangles = 0;
+			if (goWireFrame) {
+			    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+			} else {
+			    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+			}
 
-			for (const auto& [k, mesh] : meshCache) triangles += mesh.indices.size() / 3;
+			frustum Frustum = extractFrustum(projection * view);
 
-			updFpsCounter(window, time, visible, total, triangles);
-		}
+			vis.clear();
+			vis.reserve(commands.size());
 
-		glm::mat4 blendIdentity(1.0f);
+			for (const auto& cmd : commands) {
+				if (!aabbInFrustum(Frustum, cmd.aabbMin, cmd.aabbMax)) continue;
 
-		 if (lightingMode == 1) {
-			glBindFramebuffer(GL_FRAMEBUFFER, aoFbo);
-			glViewport(0, 0, aoW0, aoH0);
+				glm::vec3 center = (cmd.aabbMin + cmd.aabbMax) * 0.5f;
+				glm::vec3 d = center - camPos;
 
-			glDisable(GL_DEPTH_TEST);
+				vis.push_back({
+					&cmd,
+					glm::dot(d, d)
+				});
+			}
+
+			std::sort(vis.begin(), vis.end(), [](const visCmd& a, const visCmd& b){
+				return a.distSq < b.distSq;
+			});
+
+			mdCounts.clear();
+			mdIndices.clear();
+
+			for (const auto& v : vis) {
+				mdCounts.push_back(static_cast<GLsizei>(v.cmd->count));
+				mdIndices.push_back(reinterpret_cast<const void*>(static_cast<uintptr_t>(v.cmd->firstIndex)));
+			}
 
 			glUseProgram(shaderProgram);
-			glUniform1i(uModeLoc, 8);
+
+			glUniform1i(uModeLoc, 0);
+
+			glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
+
+			// glEnable(GL_BLEND);
+			// glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+			glBindVertexArray(vao);
+
+			if (!mdCounts.empty()) {
+				glMultiDrawElements(GL_TRIANGLES, mdCounts.data(), GL_UNSIGNED_INT, mdIndices.data(), static_cast<GLsizei>(mdCounts.size()));
+
+				GLsync frameFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+
+				for (const auto& v : vis) {
+					uint64_t k = chunkKey(v.cmd->aabbMin.x / chunkSize, v.cmd->aabbMin.y / chunkSize, v.cmd->aabbMin.z / chunkSize);
+
+					auto it = chunkSlots.find(k);
+					if (it != chunkSlots.end()) {
+						uint32_t slot = it->second;
+
+						if (slotFences[slot] != nullptr) {
+							glDeleteSync(slotFences[slot]);
+						}
+
+						slotFences[slot] = frameFence;
+					}
+				}
+			}
+
+			glBindVertexArray(0);
+
+			glDisable(GL_BLEND);
+
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+			if (hasHightlight) {
+				float e = 0.002f;
+		        float x0 = (float)highlightHit.x - e;
+		        float x1 = (float)highlightHit.x + 1.0f + e;
+		        float y0 = (float)highlightHit.y - e;
+		        float y1 = (float)highlightHit.y + 1.0f + e;
+		        float z0 = (float)highlightHit.z - e;
+		        float z1 = (float)highlightHit.z + 1.0f + e;
+		        float corners[8][3] = {
+		            {x0,y0,z0}, {x1,y0,z0}, {x1,y0,z1}, {x0,y0,z1},
+		            {x0,y1,z0}, {x1,y1,z0}, {x1,y1,z1}, {x0,y1,z1}
+		        };
+	 
+		        int edges[12][2] = {
+		            {0,1},{1,2},{2,3},{3,0},
+		            {4,5},{5,6},{6,7},{7,4},
+		            {0,4},{1,5},{2,6},{3,7}
+		        };
+	 
+		        float verts[72];
+	 
+		        int vi = 0;
+	 
+		        for (int k = 0; k < 12; k++) {
+			       	for (int j = 0; j < 2; j++) {
+			       		int c = edges[k][j];
+
+			       		verts[vi++] = corners[c][0];
+			       		verts[vi++] = corners[c][1];
+			       		verts[vi++] = corners[c][2];
+			       	}
+		        }
+
+		        glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(mvp));
+
+				glUniform4f(uColorLoc, 0.0f, 0.0f, 0.0f, 1.0f);
+
+				glBindVertexArray(lineVao);
+
+				glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+				glBufferData(GL_ARRAY_BUFFER, sizeof(verts), nullptr, GL_STREAM_DRAW);
+				glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+
+				glLineWidth(1.0f);
+				glDrawArrays(GL_LINES, 0, 24);
+			}
+
+			{
+				visible = static_cast<GLuint>(mdCounts.size());
+				total = static_cast<GLuint>(commands.size());
+				triangles = 0;
+
+				for (const auto& [k, mesh] : meshCache) triangles += mesh.indices.size() / 3;
+			}
+
+			glm::mat4 blendIdentity(1.0f);
+
+			 if (lightingMode == 1) {
+				glBindFramebuffer(GL_FRAMEBUFFER, aoFbo);
+				glViewport(0, 0, aoW0, aoH0);
+
+				glDisable(GL_DEPTH_TEST);
+
+				glUseProgram(shaderProgram);
+				glUniform1i(uModeLoc, 8);
+
+				glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(blendIdentity));
+
+				glActiveTexture(GL_TEXTURE3);
+				glBindTexture(GL_TEXTURE_2D, sceneTex);
+
+				glUniform1i(uSceneLoc, 3);
+
+				glActiveTexture(GL_TEXTURE4);
+				glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
+
+				glUniform1i(sceneDepthLoc, 4);
+
+				glActiveTexture(GL_TEXTURE5);
+				glBindTexture(GL_TEXTURE_2D, sceneNormalTex);
+
+				glUniform1i(sceneNormalLoc, 5);
+
+				glActiveTexture(GL_TEXTURE6);
+				glBindTexture(GL_TEXTURE_2D, ssaoNoiseTex);
+
+				glUniform1i(ssaoNoiseLoc, 6);
+
+				float ssaoQuad[] = {
+					-1, -1, 0, 1, -1, 0, 1, 1, 0,
+					-1, -1, 0, 1, 1, 0, -1, 1, 0
+				};
+
+				glBindVertexArray(lineVao);
+
+				glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+				glBufferData(GL_ARRAY_BUFFER, sizeof(ssaoQuad), nullptr, GL_STREAM_DRAW);
+				glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(ssaoQuad), ssaoQuad);
+
+				glDrawArrays(GL_TRIANGLES, 0, 6);
+
+				glEnable(GL_DEPTH_TEST);
+			}
+
+			if (lightingMode == 1) {
+			    glBindFramebuffer(GL_FRAMEBUFFER, aoBlurFbo);
+			    glViewport(0, 0, aoW0, aoH0);
+			    glDisable(GL_DEPTH_TEST);
+
+			    glUseProgram(shaderProgram);
+			    glUniform1i(uModeLoc, 10);
+
+			    glActiveTexture(GL_TEXTURE3);
+			    glBindTexture(GL_TEXTURE_2D, aoTex);
+			    glUniform1i(ssaoInputLoc, 3);
+
+			    float fsQuad[] = {
+			        -1, -1, 0, 1, -1, 0, 1, 1, 0,
+			        -1, -1, 0, 1,  1, 0, -1, 1, 0
+			    };
+
+			    glBindVertexArray(lineVao);
+			    glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+			    glBufferData(GL_ARRAY_BUFFER, sizeof(fsQuad), nullptr, GL_STREAM_DRAW);
+			    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fsQuad), fsQuad);
+			    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+			    glBindVertexArray(0);
+			    glEnable(GL_DEPTH_TEST);
+			}
+
+			glActiveTexture(GL_TEXTURE7);
+			glBindTexture(GL_TEXTURE_2D, aoBlurTex);
+
+			glUniform1i(ssaoResultLoc, 7);
+
+			glBindFramebuffer(GL_FRAMEBUFFER, accumFbo[1 - accumIdx]);
+			glViewport(0, 0, pastWidth, pastHeight);
+
+			glUniform1i(uModeLoc, 4);
+
+			glActiveTexture(GL_TEXTURE5);
+			glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
+			glUniform1i(sceneDepthLoc, 5);
 
 			glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(blendIdentity));
+			glUniform1f(uBlendLoc, blend);
 
 			glActiveTexture(GL_TEXTURE3);
 			glBindTexture(GL_TEXTURE_2D, sceneTex);
@@ -3367,229 +3650,157 @@ int main() {
 			glUniform1i(uSceneLoc, 3);
 
 			glActiveTexture(GL_TEXTURE4);
-			glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
-
-			glUniform1i(sceneDepthLoc, 4);
-
-			glActiveTexture(GL_TEXTURE5);
-			glBindTexture(GL_TEXTURE_2D, sceneNormalTex);
-
-			glUniform1i(sceneNormalLoc, 5);
-
-			glActiveTexture(GL_TEXTURE6);
-			glBindTexture(GL_TEXTURE_2D, ssaoNoiseTex);
-
-			glUniform1i(ssaoNoiseLoc, 6);
-
-			float ssaoQuad[] = {
-				-1, -1, 0, 1, -1, 0, 1, 1, 0,
-				-1, -1, 0, 1, 1, 0, -1, 1, 0
-			};
-
-			glBindVertexArray(lineVao);
-
-			glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(ssaoQuad), nullptr, GL_STREAM_DRAW);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(ssaoQuad), ssaoQuad);
-
-			glDrawArrays(GL_TRIANGLES, 0, 6);
-
-			glEnable(GL_DEPTH_TEST);
-		}
-
-		if (lightingMode == 1) {
-		    glBindFramebuffer(GL_FRAMEBUFFER, aoBlurFbo);
-		    glViewport(0, 0, aoW0, aoH0);
-		    glDisable(GL_DEPTH_TEST);
-
-		    glUseProgram(shaderProgram);
-		    glUniform1i(uModeLoc, 10);
-
-		    glActiveTexture(GL_TEXTURE3);
-		    glBindTexture(GL_TEXTURE_2D, aoTex);
-		    glUniform1i(ssaoInputLoc, 3);
-
-		    float fsQuad[] = {
-		        -1, -1, 0, 1, -1, 0, 1, 1, 0,
-		        -1, -1, 0, 1,  1, 0, -1, 1, 0
-		    };
-
-		    glBindVertexArray(lineVao);
-		    glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-		    glBufferData(GL_ARRAY_BUFFER, sizeof(fsQuad), nullptr, GL_STREAM_DRAW);
-		    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fsQuad), fsQuad);
-		    glDrawArrays(GL_TRIANGLES, 0, 6);
-
-		    glBindVertexArray(0);
-		    glEnable(GL_DEPTH_TEST);
-		}
-
-		glActiveTexture(GL_TEXTURE7);
-		glBindTexture(GL_TEXTURE_2D, aoBlurTex);
-
-		glUniform1i(ssaoResultLoc, 7);
-
-		glBindFramebuffer(GL_FRAMEBUFFER, accumFbo[1 - accumIdx]);
-		glViewport(0, 0, pastWidth, pastHeight);
-
-		glUniform1i(uModeLoc, 4);
-
-		glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(blendIdentity));
-		glUniform1f(uBlendLoc, blend);
-
-		glActiveTexture(GL_TEXTURE3);
-		glBindTexture(GL_TEXTURE_2D, sceneTex);
-
-		glUniform1i(uSceneLoc, 3);
-
-		glActiveTexture(GL_TEXTURE4);
-		glBindTexture(GL_TEXTURE_2D, accumTex[accumIdx]);
-
-		glUniform1i(uAccumLoc, 4);
-
-		float fullscreenQuad[] = {
-			-1, -1, 0, 1, -1, 0, 1, 1, 0, 
-			-1, -1, 0, 1, 1, 0, -1, 1, 0
-		};
-
-		glBindVertexArray(lineVao);
-		glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-		glBufferData(GL_ARRAY_BUFFER, sizeof(fullscreenQuad), nullptr, GL_STREAM_DRAW);
-		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fullscreenQuad), fullscreenQuad);
-		glDrawArrays(GL_TRIANGLES, 0, 6);
-
-		glBindVertexArray(0);
-
-		accumIdx = 1 - accumIdx;
-
-		if (lightingMode == 1) {
-			GLboolean aeDepthWas = glIsEnabled(GL_DEPTH_TEST);
-	        GLboolean aeBlendWas = glIsEnabled(GL_BLEND);
-
-	        GLint aeViewport[4];
-
-	        glGetIntegerv(GL_VIEWPORT, aeViewport);
-
-	        glDisable(GL_DEPTH_TEST);
-	        glDisable(GL_BLEND);
-
-	        glUseProgram(shaderProgram);
-
-	        glBindVertexArray(lineVao);
-	        glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-
-	        float aeQuad[] = {
-				-1, -1, 0, 1, -1, 0, 1, 1, 0, 
-				-1, -1, 0, 1, 1, 0, -1, 1, 0
-			};
-
-			glBufferData(GL_ARRAY_BUFFER, sizeof(aeQuad), nullptr, GL_STREAM_DRAW);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(aeQuad), aeQuad);
-
-			glBindFramebuffer(GL_FRAMEBUFFER, autoExpLumFbo);
-
-			glViewport(0, 0, 256, 256);
-
-			glUniform1i(uModeLoc, 11);
-
-			glActiveTexture(GL_TEXTURE4);
 			glBindTexture(GL_TEXTURE_2D, accumTex[accumIdx]);
 
 			glUniform1i(uAccumLoc, 4);
 
+			float fullscreenQuad[] = {
+				-1, -1, 0, 1, -1, 0, 1, 1, 0, 
+				-1, -1, 0, 1, 1, 0, -1, 1, 0
+			};
+
+			glBindVertexArray(lineVao);
+			glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+			glBufferData(GL_ARRAY_BUFFER, sizeof(fullscreenQuad), nullptr, GL_STREAM_DRAW);
+			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fullscreenQuad), fullscreenQuad);
 			glDrawArrays(GL_TRIANGLES, 0, 6);
 
-			glActiveTexture(GL_TEXTURE8);
-			glBindTexture(GL_TEXTURE_2D, autoExpLum);
+			glBindVertexArray(0);
 
-			glGenerateMipmap(GL_TEXTURE_2D);
+			accumIdx = 1 - accumIdx;
 
-			int autoExpNext = 1 - autoExpCur;
+			if (lightingMode == 1) {
+				GLboolean aeDepthWas = glIsEnabled(GL_DEPTH_TEST);
+		        GLboolean aeBlendWas = glIsEnabled(GL_BLEND);
 
-			glBindFramebuffer(GL_FRAMEBUFFER, autoExpFbo[autoExpNext]);
+		        GLint aeViewport[4];
 
-			glViewport(0, 0, 1, 1);
+		        glGetIntegerv(GL_VIEWPORT, aeViewport);
 
-			glUniform1i(uModeLoc, 12);
-			glUniform1i(aeLumLoc, 8);
+		        glDisable(GL_DEPTH_TEST);
+		        glDisable(GL_BLEND);
 
-			glActiveTexture(GL_TEXTURE9);
-			glBindTexture(GL_TEXTURE_2D, autoExpTex[autoExpCur]);
+		        glUseProgram(shaderProgram);
 
-			glUniform1i(aeExpLoc, 9);
+		        glBindVertexArray(lineVao);
+		        glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
 
-			glUniform1f(aeAdaptLoc, 1.0f - std::exp(-deltaTime * exposureSpeed));
+		        float aeQuad[] = {
+					-1, -1, 0, 1, -1, 0, 1, 1, 0, 
+					-1, -1, 0, 1, 1, 0, -1, 1, 0
+				};
+
+				glBufferData(GL_ARRAY_BUFFER, sizeof(aeQuad), nullptr, GL_STREAM_DRAW);
+				glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(aeQuad), aeQuad);
+
+				glBindFramebuffer(GL_FRAMEBUFFER, autoExpLumFbo);
+
+				glViewport(0, 0, 256, 256);
+
+				glUniform1i(uModeLoc, 11);
+
+				glActiveTexture(GL_TEXTURE4);
+				glBindTexture(GL_TEXTURE_2D, accumTex[accumIdx]);
+
+				glUniform1i(uAccumLoc, 4);
+
+				glDrawArrays(GL_TRIANGLES, 0, 6);
+
+				glActiveTexture(GL_TEXTURE8);
+				glBindTexture(GL_TEXTURE_2D, autoExpLum);
+
+				glGenerateMipmap(GL_TEXTURE_2D);
+
+				int autoExpNext = 1 - autoExpCur;
+
+				glBindFramebuffer(GL_FRAMEBUFFER, autoExpFbo[autoExpNext]);
+
+				glViewport(0, 0, 1, 1);
+
+				glUniform1i(uModeLoc, 12);
+				glUniform1i(aeLumLoc, 8);
+
+				glActiveTexture(GL_TEXTURE9);
+				glBindTexture(GL_TEXTURE_2D, autoExpTex[autoExpCur]);
+
+				glUniform1i(aeExpLoc, 9);
+
+				glUniform1f(aeAdaptLoc, 1.0f - std::exp(-deltaTime * exposureSpeed));
+
+				glDrawArrays(GL_TRIANGLES, 0, 6);
+
+				autoExpCur = autoExpNext;
+
+				if (aeDepthWas) glEnable(GL_DEPTH_TEST);
+				if (aeBlendWas) glEnable(GL_BLEND);
+
+				glViewport(aeViewport[0], aeViewport[1], aeViewport[2], aeViewport[3]);
+
+			}
+
+			glBindFramebuffer(GL_FRAMEBUFFER, bloomFbo[0]);
+			glViewport(0, 0, bloomWidth, bloomHeight);
+
+			glUseProgram(shaderProgram);
+
+			glUniform1i(uModeLoc, 6);
+
+			glActiveTexture(GL_TEXTURE5);
+
+			glBindTexture(GL_TEXTURE_2D, accumTex[accumIdx]);
+			glUniform1i(bloomInputLoc, 5);
+
+			glUniform1f(bloomThresholdLoc, 1.0f);
+
+			glBindVertexArray(lineVao);
+			glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
+
+			glBufferData(GL_ARRAY_BUFFER, sizeof(fullscreenQuad), nullptr, GL_STREAM_DRAW);
+
+			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fullscreenQuad), fullscreenQuad);
 
 			glDrawArrays(GL_TRIANGLES, 0, 6);
 
-			autoExpCur = autoExpNext;
+			glBindFramebuffer(GL_FRAMEBUFFER, bloomFbo[1]);
+			glViewport(0, 0, bloomWidth, bloomHeight);
 
-			if (aeDepthWas) glEnable(GL_DEPTH_TEST);
-			if (aeBlendWas) glEnable(GL_BLEND);
+			glUniform1i(uModeLoc, 7);
 
-			glViewport(aeViewport[0], aeViewport[1], aeViewport[2], aeViewport[3]);
+			glActiveTexture(GL_TEXTURE5);
+			glBindTexture(GL_TEXTURE_2D, bloomTex[0]);
+			glUniform1i(bloomInputLoc, 5);
 
+			glUniform2f(bloomTexelSizeLoc, 1.0f / static_cast<float>(bloomWidth), 0.0f);
+
+			glDrawArrays(GL_TRIANGLES, 0, 6);
+
+			glBindFramebuffer(GL_FRAMEBUFFER, bloomFbo[0]);
+			glViewport(0, 0, bloomWidth, bloomHeight);
+
+			glActiveTexture(GL_TEXTURE5);
+			glBindTexture(GL_TEXTURE_2D, bloomTex[1]);
+			glUniform1i(bloomInputLoc, 5);
+
+			glUniform2f(bloomTexelSizeLoc, 0.0f, 1.0f / static_cast<float>(bloomHeight));
+
+			glDrawArrays(GL_TRIANGLES, 0, 6);
+
+			glBindVertexArray(0);
 		}
-
-		glBindFramebuffer(GL_FRAMEBUFFER, bloomFbo[0]);
-		glViewport(0, 0, bloomWidth, bloomHeight);
-
-		glUseProgram(shaderProgram);
-
-		glUniform1i(uModeLoc, 6);
-
-		glActiveTexture(GL_TEXTURE5);
-
-		glBindTexture(GL_TEXTURE_2D, accumTex[accumIdx]);
-		glUniform1i(bloomInputLoc, 5);
-
-		glUniform1f(bloomThresholdLoc, 1.0f);
-
-		glBindVertexArray(lineVao);
-		glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-
-		glBufferData(GL_ARRAY_BUFFER, sizeof(fullscreenQuad), nullptr, GL_STREAM_DRAW);
-
-		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fullscreenQuad), fullscreenQuad);
-
-		glDrawArrays(GL_TRIANGLES, 0, 6);
-
-		glBindFramebuffer(GL_FRAMEBUFFER, bloomFbo[1]);
-		glViewport(0, 0, bloomWidth, bloomHeight);
-
-		glUniform1i(uModeLoc, 7);
-
-		glActiveTexture(GL_TEXTURE5);
-		glBindTexture(GL_TEXTURE_2D, bloomTex[0]);
-		glUniform1i(bloomInputLoc, 5);
-
-		glUniform2f(bloomTexelSizeLoc, 1.0f / static_cast<float>(bloomWidth), 0.0f);
-
-		glDrawArrays(GL_TRIANGLES, 0, 6);
-
-		glBindFramebuffer(GL_FRAMEBUFFER, bloomFbo[0]);
-		glViewport(0, 0, bloomWidth, bloomHeight);
-
-		glActiveTexture(GL_TEXTURE5);
-		glBindTexture(GL_TEXTURE_2D, bloomTex[1]);
-		glUniform1i(bloomInputLoc, 5);
-
-		glUniform2f(bloomTexelSizeLoc, 0.0f, 1.0f / static_cast<float>(bloomHeight));
-
-		glDrawArrays(GL_TRIANGLES, 0, 6);
-
-		glBindVertexArray(0);
 
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
 		glViewport(0, 0, width, height);
-
-		glUniform1i(uModeLoc, 0);
 		
 		glDisable(GL_DEPTH_TEST);
 
 		glUseProgram(shaderProgram);
-		glUniform1i(uModeLoc, 5);
+		glUniform1i(uModeLoc, isGeneratedFrame ? 13 : 5);
+		glUniformMatrix4fv(invViewProjLoc, 1, GL_FALSE, glm::value_ptr(invVp));
+
+		glActiveTexture(GL_TEXTURE4);
+		glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
+		glUniform1i(sceneDepthLoc, 4);
 
 		glActiveTexture(GL_TEXTURE3);
 		glBindTexture(GL_TEXTURE_2D, accumTex[accumIdx]);
@@ -3620,6 +3831,10 @@ int main() {
 		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(displayQuad), displayQuad);
 		
 		glDrawArrays(GL_TRIANGLES, 0, 6);
+
+		if (!isGeneratedFrame) {
+			prevVp = currBaseVp;
+		}
 
 		glUniform1i(uModeLoc, 1);
 
@@ -3653,6 +3868,8 @@ int main() {
 		glBindTexture(GL_TEXTURE_2D, sceneTex);
 		
 		glBindVertexArray(0);
+
+		updFpsCounter(window, time, visible, total, triangles);
 
 		glfwSwapBuffers(window);
 		glfwPollEvents();
