@@ -49,7 +49,7 @@ int cascadeRays2 = 5;
 int frameGenAmount = 2;
 
 const char* stringed = "basic window";
-const float renderScale = 0.76f;
+const float renderScale = 0.65f;
 
 float ssaoRadius = 0.75f;
 float ssaoBias = 0.003f;

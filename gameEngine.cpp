@@ -2192,6 +2192,29 @@ int main() {
 
     glBindVertexArray(0);
 
+    float quad[] = {
+		-1, -1, 0, 1, -1, 0, 1, 1, 0,
+		-1, -1, 0, 1, 1, 0, -1, 1, 0
+	};
+
+    GLuint fsQuadVao, fsQuadVbo;
+
+    glGenVertexArrays(1, &fsQuadVao);
+    glGenBuffers(1, &fsQuadVbo);
+
+    glBindVertexArray(fsQuadVao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, fsQuadVbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), nullptr, GL_STATIC_DRAW);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(quad), quad);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    glBindVertexArray(0);
+
     GLuint sceneFbo, sceneTex, sceneDepthTex, sceneNormalTex;
 
     glGenFramebuffers(1, &sceneFbo);
@@ -2251,8 +2274,8 @@ int main() {
 	for (int i = 0; i < 2; i++) {
 	    glBindTexture(GL_TEXTURE_2D, accumTex[i]);
 	    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, pastWidth, pastHeight, 0, GL_RGBA, GL_FLOAT, nullptr);
-	    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	    glBindFramebuffer(GL_FRAMEBUFFER, accumFbo[i]);
 	    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, accumTex[i], 0);
 	}
@@ -2441,11 +2464,11 @@ int main() {
 	                uint32_t row = c.voxel[0][y][z] | c.voxel[1][y][z] | c.voxel[2][y][z];
 	                if (!row) continue;
 
-	                for (int x = 0; x < chunkSize; x++) {
-	                    if (!(row & (1u << x))) continue;
+	                for (int bxlocal = 0; bxlocal < chunkSize; bxlocal++) {
+	                    if (!(row & (0xFFu << (bxlocal * 8)))) continue;
 
-	                    int bx = (cwx + x - originX) / brickSize;
-	                    int by = (cwy + y)            / brickSize;
+	                    int bx = (cwx - originX) / brickSize + bxlocal;
+	                    int by = (cwy + y) / brickSize;
 	                    int bz = (cwz + z - originZ) / brickSize;
 
 	                    if (bx < 0 || bx >= brickDimX) continue;
@@ -3129,7 +3152,7 @@ int main() {
 
 		static int frameSubIdx = 0;
 
-		bool isGeneratedFrame = (frameGenAmount > 1) && (frameSubIdx > 0);
+		bool isGeneratedFrame = ggtuEnabled && (frameGenAmount > 1) && (frameSubIdx > 0);
 
 		frameSubIdx = (frameSubIdx + 1) % frameGenAmount;
 
@@ -3140,13 +3163,6 @@ int main() {
 
 		glm::mat4 baseProjection = glm::perspective(glm::radians(cfov), static_cast<float>(width) / static_cast<float>(height), 0.1f, 800.0f);
 		glm::mat4 projection = baseProjection;
-		if (ggtuEnabled && !isGeneratedFrame) {
-			glm::vec2 jitter = (halton8[accumFrame & 7] - 0.5f) * 2.0f;
-
-			projection[2][0] += jitter.x / static_cast<float>(pastWidth);
-			projection[2][1] += jitter.y / static_cast<float>(pastHeight);
-		}
-
 		glm::mat4 view = glm::lookAt(camPos, camPos + camFront, up);
 		glm::mat4 currVp = projection * view;
 		glm::mat4 currBaseVp = baseProjection * view;
@@ -3173,7 +3189,7 @@ int main() {
 			accumFrame++;
 		}
 
-		float blend = ggtuEnabled ? 0.14f : 1.0f;
+		float blend = 1.0f;
 
 		glUniform3f(sunDirLoc, sunDir.x, sunDir.y, sunDir.z);
 
@@ -3321,14 +3337,25 @@ int main() {
 
 	            glUniform1i(frameIndexLoc, accumFrame);
 
-	            for (int c = 0; c < giCascades; c++) {
+	            glUniform3iv(giOriginsCLoc, giCascades, (const GLint*)giOrigin);
+
+	            glUniform1fv(giVoxelSizesCLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
+
+	            static const std::vector<float> zeroCascade((size_t)giVoxelsPerCascade * 4, 0.0f);
+	            GLsizeiptr histBytes = (GLsizeiptr)giVoxelsPerCascade * sizeof(float) * 4;
+
+	            for (int c = giCascades - 1; c >= 0; c--) {
 	            	int vs = (int)giVoxelSizeArr[c];
 	            	int half = giDim * vs / 2;
 	            	int maxY = std::max(0, worldHeight - giDim * vs);
 
 	            	glm::ivec3 want(floorDiv(px - half, vs) * vs, std::clamp(py - half, 0, maxY), floorDiv(pz - half, vs) * vs);
 
-	            	bool moved = std::abs(want.x - giOrigin[c].x) >= vs * 16 || std::abs(want.y - giOrigin[c].y) >= vs * 16 || std::abs(want.z - giOrigin[c].z) >= vs * 16;
+	            	int stepThreshold = std::max(vs, (giDim / 4) * vs);
+
+	            	bool moved = std::abs(want.x - giOrigin[c].x) >= stepThreshold || std::abs(want.y - giOrigin[c].y) >= stepThreshold || std::abs(want.z - giOrigin[c].z) >= stepThreshold;
+
+	            	int warmupPasses = 1;
 	            	if (giDirty || moved) {
 	            		giOrigin[c] = want;
 
@@ -3336,25 +3363,29 @@ int main() {
 
 	            		glBindBuffer(GL_SHADER_STORAGE_BUFFER, giVoxelSsbo);
 	            		glBufferSubData(GL_SHADER_STORAGE_BUFFER, c * voxelBytes, voxelBytes, giVoxelCache[c].data());
+
+	            		glBindBuffer(GL_SHADER_STORAGE_BUFFER, giBaseSsbo);
+	            		glBufferSubData(GL_SHADER_STORAGE_BUFFER, c * histBytes, histBytes, zeroCascade.data());
+
+	            		glUniform3iv(giOriginsCLoc, giCascades, (const GLint*)giOrigin);
+
+	            		warmupPasses = 3;
 	            	}
-	            }
 
-	            giDirty = false;
-
-	            glUniform3iv(giOriginsCLoc, giCascades, (const GLint*)giOrigin);
-
-	            glUniform1fv(giVoxelSizesCLoc, giCascades, (const GLfloat*)giVoxelSizeArr);
-
-	            for (int c = giCascades - 1; c >= 0; c--) {
 	            	int dim = cascadeDims[c];
 
 	            	glUniform1i(giCascadeLoc, c);
 	            	glUniform1i(giDimComputeLoc, dim);
 	            	glUniform1i(girayCountLoc, cascadeRays[c]);
 
-	            	glDispatchCompute(dim / 4, dim / 4, dim / 4);
-	            	glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+	            	for (int p = 0; p < warmupPasses; p++) {
+	            		glUniform1i(frameIndexLoc, accumFrame + p);
+	            		glDispatchCompute(dim / 4, dim / 4, dim / 4);
+	            		glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+	            	}
 	            }
+
+	            giDirty = false;
 
 	            glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
@@ -3406,18 +3437,11 @@ int main() {
 
 			glUniform1f(timeOfDayLoc, timeOfDay);
 
-			float skyQuad[] = {
-				-1, -1, 0, 1, -1, 0, 1, 1, 0,
-				-1, -1, 0, 1, 1, 0, -1, 1, 0
-			};
-
 			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
-			glBindVertexArray(lineVao);
+			glBindVertexArray(fsQuadVao);
 
-			glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(skyQuad), nullptr, GL_STREAM_DRAW);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(skyQuad), skyQuad);
+			glBindBuffer(GL_ARRAY_BUFFER, fsQuadVbo);
 			glDrawArrays(GL_TRIANGLES, 0, 6);
 
 			glEnable(GL_DEPTH_TEST);
@@ -3584,16 +3608,9 @@ int main() {
 
 				glUniform1i(ssaoNoiseLoc, 6);
 
-				float ssaoQuad[] = {
-					-1, -1, 0, 1, -1, 0, 1, 1, 0,
-					-1, -1, 0, 1, 1, 0, -1, 1, 0
-				};
+				glBindVertexArray(fsQuadVao);
 
-				glBindVertexArray(lineVao);
-
-				glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-				glBufferData(GL_ARRAY_BUFFER, sizeof(ssaoQuad), nullptr, GL_STREAM_DRAW);
-				glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(ssaoQuad), ssaoQuad);
+				glBindBuffer(GL_ARRAY_BUFFER, fsQuadVbo);
 
 				glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -3612,15 +3629,8 @@ int main() {
 			    glBindTexture(GL_TEXTURE_2D, aoTex);
 			    glUniform1i(ssaoInputLoc, 3);
 
-			    float fsQuad[] = {
-			        -1, -1, 0, 1, -1, 0, 1, 1, 0,
-			        -1, -1, 0, 1,  1, 0, -1, 1, 0
-			    };
-
-			    glBindVertexArray(lineVao);
-			    glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-			    glBufferData(GL_ARRAY_BUFFER, sizeof(fsQuad), nullptr, GL_STREAM_DRAW);
-			    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fsQuad), fsQuad);
+			    glBindVertexArray(fsQuadVao);
+			    glBindBuffer(GL_ARRAY_BUFFER, fsQuadVbo);
 			    glDrawArrays(GL_TRIANGLES, 0, 6);
 
 			    glBindVertexArray(0);
@@ -3654,15 +3664,8 @@ int main() {
 
 			glUniform1i(uAccumLoc, 4);
 
-			float fullscreenQuad[] = {
-				-1, -1, 0, 1, -1, 0, 1, 1, 0, 
-				-1, -1, 0, 1, 1, 0, -1, 1, 0
-			};
-
-			glBindVertexArray(lineVao);
-			glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-			glBufferData(GL_ARRAY_BUFFER, sizeof(fullscreenQuad), nullptr, GL_STREAM_DRAW);
-			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fullscreenQuad), fullscreenQuad);
+			glBindVertexArray(fsQuadVao);
+			glBindBuffer(GL_ARRAY_BUFFER, fsQuadVbo);
 			glDrawArrays(GL_TRIANGLES, 0, 6);
 
 			glBindVertexArray(0);
@@ -3682,16 +3685,8 @@ int main() {
 
 		        glUseProgram(shaderProgram);
 
-		        glBindVertexArray(lineVao);
-		        glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-
-		        float aeQuad[] = {
-					-1, -1, 0, 1, -1, 0, 1, 1, 0, 
-					-1, -1, 0, 1, 1, 0, -1, 1, 0
-				};
-
-				glBufferData(GL_ARRAY_BUFFER, sizeof(aeQuad), nullptr, GL_STREAM_DRAW);
-				glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(aeQuad), aeQuad);
+		        glBindVertexArray(fsQuadVao);
+		        glBindBuffer(GL_ARRAY_BUFFER, fsQuadVbo);
 
 				glBindFramebuffer(GL_FRAMEBUFFER, autoExpLumFbo);
 
@@ -3752,12 +3747,8 @@ int main() {
 
 			glUniform1f(bloomThresholdLoc, 1.0f);
 
-			glBindVertexArray(lineVao);
-			glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-
-			glBufferData(GL_ARRAY_BUFFER, sizeof(fullscreenQuad), nullptr, GL_STREAM_DRAW);
-
-			glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(fullscreenQuad), fullscreenQuad);
+			glBindVertexArray(fsQuadVao);
+			glBindBuffer(GL_ARRAY_BUFFER, fsQuadVbo);
 
 			glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -3820,16 +3811,9 @@ int main() {
 		glm::mat4 displayIdentity(1.0f);
 		glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, glm::value_ptr(displayIdentity));
 
-		float displayQuad[] = {
-		    -1, -1, 0, 1, -1, 0, 1, 1, 0,
-		    -1, -1, 0, 1, 1, 0, -1, 1, 0
-		};
+		glBindVertexArray(fsQuadVao);
+		glBindBuffer(GL_ARRAY_BUFFER, fsQuadVbo);
 
-		glBindVertexArray(lineVao);
-		glBindBuffer(GL_ARRAY_BUFFER, lineVbo);
-		glBufferData(GL_ARRAY_BUFFER, sizeof(displayQuad), nullptr, GL_STREAM_DRAW);
-		glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(displayQuad), displayQuad);
-		
 		glDrawArrays(GL_TRIANGLES, 0, 6);
 
 		if (!isGeneratedFrame) {
