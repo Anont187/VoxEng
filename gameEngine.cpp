@@ -491,6 +491,22 @@ chunkMesh buildChunkMesh(chunkMesh& out, const Chunk& chunk, int chunkX, int chu
 
 	int8_t mask[chunkSize][chunkSize];
 
+	uint16_t aoMask[chunkSize][chunkSize] = {};
+
+	auto sampleSolidAo = [&](int x, int y, int z) -> int {
+		int outsideAxes = (x < 0 || x >= chunkSize) + (y < 0 || y >= chunkSize) + (z < 0 || z >= chunkSize);
+	    if (outsideAxes > 1) return 0;
+	    if (x >= 0 && x < chunkSize && y >= 0 && y < chunkSize && z >= 0 && z < chunkSize) return getVoxel(chunk, x, y, z) != 0 ? 1 : 0;
+	    if (x < 0)          return (negX && getVoxel(*negX, x + chunkSize, y, z) != 0) ? 1 : 0;
+	    if (x >= chunkSize) return (posX && getVoxel(*posX, x - chunkSize, y, z) != 0) ? 1 : 0;
+	    if (z < 0)          return (negZ && getVoxel(*negZ, x, y, z + chunkSize) != 0) ? 1 : 0;
+	    if (z >= chunkSize) return (posZ && getVoxel(*posZ, x, y, z - chunkSize) != 0) ? 1 : 0;
+	    if (y < 0)          return (negY && getVoxel(*negY, x, y + chunkSize, z) != 0) ? 1 : 0;
+	    if (y >= chunkSize) return (posY && getVoxel(*posY, x, y - chunkSize, z) != 0) ? 1 : 0;
+	    
+	    return 0;
+	};
+
 	glm::vec3 chunkOffset(chunkX * chunkSize, chunkY * chunkSize, chunkZ * chunkSize);
 
 	for (int axis = 0; axis < 3; axis++) {
@@ -562,6 +578,43 @@ chunkMesh buildChunkMesh(chunkMesh& out, const Chunk& chunk, int chunkX, int chu
             }
 
             for (int v = 0; v < chunkSize; v++) {
+            	for (int u = 0; u < chunkSize; u++) {
+            		int8_t val = mask[u][v];
+            		if (val == 0) {
+            			aoMask[u][v] = 0;
+
+            			continue;
+            		}
+
+            		int airSlice = (val > 0) ? (slice + 1) : slice;
+
+            		auto occAt = [&](int uPos, int vPos, int du, int dv) -> uint8_t {
+            			int p1[3] = {0, 0, 0};
+            			int p2[3] = {0, 0, 0};
+            			int pc[3] = {0, 0, 0};
+
+            			p1[axis] = p2[axis] = pc[axis] = airSlice;
+                        p1[uAxis] = uPos + du; p1[vAxis] = vPos;
+                        p2[uAxis] = uPos;      p2[vAxis] = vPos + dv;
+                        pc[uAxis] = uPos + du; pc[vAxis] = vPos + dv;
+
+                        int s1 = sampleSolidAo(p1[0], p1[1], p1[2]);
+                        int s2 = sampleSolidAo(p2[0], p2[1], p2[2]);
+                        int sc = sampleSolidAo(pc[0], pc[1], pc[2]);
+
+                        return static_cast<uint8_t>((s1 && s2) ? 0 : (3 - (s1 + s2 + sc)));
+            		};
+
+            		uint8_t o00 = occAt(u, v, -1, -1);
+            		uint8_t o10 = occAt(u, v, 1, -1);
+            		uint8_t o11 = occAt(u, v, 1, 1);
+            		uint8_t o01 = occAt(u, v, -1, 1);
+
+            		aoMask[u][v] = static_cast<uint16_t>(o00 | (o10 << 2) | (o11 << 4) | (o01 << 6));
+            	}
+            }
+
+            for (int v = 0; v < chunkSize; v++) {
             	bool rowEmpty = true;
 
             	for (int u = 0; u < chunkSize; u++) {
@@ -583,9 +636,11 @@ chunkMesh buildChunkMesh(chunkMesh& out, const Chunk& chunk, int chunkX, int chu
                         continue;
                     }
 
+                    uint16_t aoKey = aoMask[u][v];
+
                     int width = 1;
 
-                    while (u + width < chunkSize && mask[u + width][v] == value) {
+                    while (u + width < chunkSize && mask[u + width][v] == value && aoMask[u + width][v] == aoKey) {
                         width++;
                     }
 
@@ -596,7 +651,7 @@ chunkMesh buildChunkMesh(chunkMesh& out, const Chunk& chunk, int chunkX, int chu
                     while (v + height < chunkSize && !done) {
 
                         for (int x = 0; x < width; x++) {
-                            if (mask[u + x][v + height] != value) {
+                            if (mask[u + x][v + height] != value || aoMask[u + x][v + height] != aoKey) {
                                 done = true;
                                 break;
                             }
@@ -608,49 +663,20 @@ chunkMesh buildChunkMesh(chunkMesh& out, const Chunk& chunk, int chunkX, int chu
 
                     int plane = slice + 1;
 
-                    auto sampleSolid = [&](int x, int y, int z) -> int {
-                    	int outsideAxes = (x < 0 || x >= chunkSize) + (y < 0 || y >= chunkSize) + (z < 0 || z >= chunkSize);
-                    	if (outsideAxes > 1) return 0;
-					    if (x >= 0 && x < chunkSize && y >= 0 && y < chunkSize && z >= 0 && z < chunkSize) return getVoxel(chunk, x, y, z) != 0 ? 1 : 0;
-					    if (x < 0)          return (negX && getVoxel(*negX, x + chunkSize, y, z) != 0) ? 1 : 0;
-					    if (x >= chunkSize) return (posX && getVoxel(*posX, x - chunkSize, y, z) != 0) ? 1 : 0;
-					    if (z < 0)          return (negZ && getVoxel(*negZ, x, y, z + chunkSize) != 0) ? 1 : 0;
-					    if (z >= chunkSize) return (posZ && getVoxel(*posZ, x, y, z - chunkSize) != 0) ? 1 : 0;
-					    if (y < 0)          return (negY && getVoxel(*negY, x, y + chunkSize, z) != 0) ? 1 : 0;
-					    if (y >= chunkSize) return (posY && getVoxel(*posY, x, y - chunkSize, z) != 0) ? 1 : 0;
+                    const uint8_t lut[4] = { 115, 150, 235, 255 };
 
-					    return 0;
-					};
-
-					auto cornerAo = [&](int uPos, int vPos, int du, int dv) -> uint8_t {
-					    int airSlice = (value > 0) ? (slice + 1) : slice;
-					    int p1[3] = {0, 0, 0}, p2[3] = {0, 0, 0}, pc[3] = {0, 0, 0};
-
-					    p1[axis] = p2[axis] = pc[axis] = airSlice;
-					    p1[uAxis] = uPos + du; p1[vAxis] = vPos;
-					    p2[uAxis] = uPos;      p2[vAxis] = vPos + dv;
-					    pc[uAxis] = uPos + du; pc[vAxis] = vPos + dv;
-
-					    int s1 = sampleSolid(p1[0], p1[1], p1[2]);
-					    int s2 = sampleSolid(p2[0], p2[1], p2[2]);
-					    int sc = sampleSolid(pc[0], pc[1], pc[2]);
-					    int occ = (s1 && s2) ? 0 : (3 - (s1 + s2 + sc));
-
-					    const uint8_t lut[4] = { 115, 165, 210, 255 };
-
-					    return lut[occ];
-					};
-
-					uint8_t ao00 = cornerAo(u, v, - 1, - 1);
-					uint8_t ao10 = cornerAo(u + width, v, + 1, - 1);
-					uint8_t ao11 = cornerAo(u + width, v + height, + 1, + 1);
-					uint8_t ao01 = cornerAo(u, v + height, - 1, + 1);
+					uint8_t ao00 = lut[(aoKey >> 0) & 3];
+					uint8_t ao10 = lut[(aoKey >> 2) & 3];
+					uint8_t ao11 = lut[(aoKey >> 4) & 3];
+					uint8_t ao01 = lut[(aoKey >> 6) & 3];
 
                     addGreedyQuad(out, axis, value, plane, u, v, width, height, chunkOffset, ao00, ao10, ao11, ao01);
 
                     for (int y = 0; y < height; y++) {
                         for (int x = 0; x < width; x++) {
                             mask[u + x][v + y] = 0;
+
+                            aoMask[u + x][v + y] = 0;
                         }
                     }
 
@@ -811,7 +837,46 @@ void framebufferSizeCallback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
 }
 
-void updFpsCounter(GLFWwindow* window, double time, GLuint visible, GLuint total, GLuint triangles) {
+float parseTimeToTod(const std::string& timeStr, float fallbackTod) {
+    int hour = 0, minute = 0;
+
+    char ampm[8] = {0};
+
+    int matched = std::sscanf(timeStr.c_str(), "%d:%d %7s", &hour, &minute, ampm);
+    if (matched < 2) return fallbackTod;
+
+    if (matched == 3) {
+        for (int i = 0; ampm[i]; i++) ampm[i] = static_cast<char>(std::tolower(ampm[i]));
+        if (std::string(ampm) == "pm" && hour < 12) hour += 12;
+        if (std::string(ampm) == "am" && hour == 12) hour = 0;
+    }
+
+    float hours24 = static_cast<float>(hour) + static_cast<float>(minute) / 60.0f;
+    float tod = std::fmod((hours24 - 6.0f) / 24.0f, 1.0f);
+    if (tod < 0.0f) tod += 1.0f;
+
+    return tod;
+}
+
+
+void formatTOD2Realtime(float tod, char* outBuf, size_t bufSize) {
+	float wrappedTOD = tod - std::floor(tod);
+	float hours24 = std::fmod(wrappedTOD * 24.0f + 6.0f, 24.0f);
+	if (hours24 < 0.0f) hours24 += 24.0f;
+
+	int totalMinutes = static_cast<int>(std::floor(hours24 * 60.0f + 0.0001f)) % (24 * 60);
+	int hour24 = totalMinutes / 60;
+	int minute = totalMinutes % 60;
+
+	const char* period = (hour24 >= 12) ? "pm" : "am";
+
+	int hour12 = hour24 % 12;
+	if (hour12 == 0) hour12 = 12; 
+
+	std::snprintf(outBuf, bufSize, "%d:%02d %s", hour12, minute, period);
+}
+
+void updFpsCounter(GLFWwindow* window, double time, GLuint visible, GLuint total, GLuint triangles, const char* stringed1) {
 	static double prevT = 0.0;
 	static int fc = 0;
 
@@ -820,12 +885,16 @@ void updFpsCounter(GLFWwindow* window, double time, GLuint visible, GLuint total
 	double mspf;
 
 	if (et >= 0.5) {
-		double fps = (double)fc / et;
+		double fps = (double)fc / et;	
 		mspf = (fps > 0.0) ? (1000.0 / fps) : 0.0;
+
+		char clockStr[16];
+
+		formatTOD2Realtime(timeOfDay, clockStr, sizeof(clockStr));
 
 		char ts[256];
 
-		std::snprintf(ts, sizeof(ts), "%s | FPS: %.1f | Frame Time: %.2fms | Chunk: %u/%u | Triangles: %u", stringed, fps, mspf, visible, total, triangles);
+		std::snprintf(ts, sizeof(ts), "%s | TIME: %s | FPS: %.1f | Frame Time: %.2fms | Chunk: %u/%u | Triangles: %u", stringed1, clockStr, fps, mspf, visible, total, triangles);
 
 		glfwSetWindowTitle(window, ts);
 
@@ -1426,7 +1495,6 @@ Chunk makeChunk(int chunkX, int chunkY, int chunkZ) {
 	return makeChunkFromGrid(chunkX, chunkY, chunkZ, grid);
 }
 
-static std::map<std::string, float> gSettings;
 static std::string trimSpaces(const std::string& s) {
 	const char* ws = " \t\r\n";
 
@@ -1438,6 +1506,9 @@ static std::string trimSpaces(const std::string& s) {
 
 	return s.substr(a, b - a + 1);
 }
+
+static std::map<std::string, float> gSettings;
+static std::map<std::string, std::string> gStringSettings;
 
 static void loadSettings(const std::string& path) {
 	std::ifstream file(path);
@@ -1473,6 +1544,11 @@ static void loadSettings(const std::string& path) {
 
 		val = trimSpaces(val);
 		if (name.empty() || val.empty()) continue;
+		if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
+			gStringSettings[name] = val.substr(1, val.size() - 2);
+
+			continue;
+		}
 		if (val == "true") {
 			gSettings[name] = 1.0f;
 
@@ -1511,6 +1587,11 @@ static void loadSettings(const std::string& path) {
 	if (skipped > 0) std::cout << " (" << skipped << " lines skipped)";
 
 	std::cout << "\n";
+}
+
+static std::string settingStr(const std::string& key, const std::string& fallback) {
+	auto it = gStringSettings.find(key);
+	return it != gStringSettings.end() ? it->second : fallback;
 }
 
 static float setting(const std::string& key, float fallback) {
@@ -1709,6 +1790,8 @@ static void giFillAndLight(const chunkMap& ch, const glm::ivec3& origin, int vs,
 }
 
 static void giBuildVoxelTypes(const chunkMap& chunks, const glm::ivec3 origin, int vs, std::vector<uint32_t>& out) {
+	std::fill(out.begin(), out.end(), 0u);
+
 	const Chunk* cached = nullptr;
 
 	int oldCx = 0;
@@ -1906,7 +1989,15 @@ int main() {
 
 	loadSettings("settings.txt");
 
+	static std::string windowTitle = settingStr("stringed", stringed);
+
+	stringed = windowTitle.c_str();
+
 	timeOfDay = setting("timeOfDay", timeOfDay);
+	std::string startTimeStr = settingStr("startTime", "");
+	if (!startTimeStr.empty()) {
+		timeOfDay = parseTimeToTod(startTimeStr, timeOfDay);
+	}
     cameraSpeed = setting("cameraSpeed", cameraSpeed);
     sprintSpeed = setting("sprintSpeed", sprintSpeed);
     baseSensitivity = setting("baseSensitivity", baseSensitivity);
@@ -2139,7 +2230,8 @@ int main() {
     std::unordered_map<uint64_t, uint32_t> chunkSlots;
     std::vector<uint32_t> freeSlots;
 
-    GLsync slotFences[maxChunkSlots] = { nullptr };
+    uint64_t slotLastFrame[maxChunkSlots] = { 0 };
+	uint64_t renderFrameCounter = 0;
 
     uint32_t nextFreeSlot = 0;
 
@@ -2464,7 +2556,7 @@ int main() {
 	                uint32_t row = c.voxel[0][y][z] | c.voxel[1][y][z] | c.voxel[2][y][z];
 	                if (!row) continue;
 
-	                for (int bxlocal = 0; bxlocal < chunkSize; bxlocal++) {
+	                for (int bxlocal = 0; bxlocal < 4; bxlocal++) {
 	                    if (!(row & (0xFFu << (bxlocal * 8)))) continue;
 
 	                    int bx = (cwx - originX) / brickSize + bxlocal;
@@ -2563,6 +2655,8 @@ int main() {
 	GLint internalTexelLoc = glGetUniformLocation(shaderProgram, "uInternalTexelSize");
 	GLint ggtuEnabledLoc = glGetUniformLocation(shaderProgram, "uGgtuEnabled");
 	GLint motionBlurLoc = glGetUniformLocation(shaderProgram, "uMotionBlurScale");
+	GLint fogDensityLoc = glGetUniformLocation(shaderProgram, "uFogDensity");
+	GLint shadowSunDirLoc = glGetUniformLocation(shaderProgram, "uShadowSunDir");
 
     std::cout << "STARTUP: Made LOOKUP locations for glUniform\n" << std::flush;
 
@@ -2573,6 +2667,7 @@ int main() {
 	GLint girayCountLoc = glGetUniformLocation(computeProgram, "uRayCount");
 	GLint giOriginsCLoc = glGetUniformLocation(computeProgram, "giOrigins");
 	GLint giVoxelSizesCLoc = glGetUniformLocation(computeProgram, "giVoxelSizes");
+	GLint fillPassLoc = glGetUniformLocation(computeProgram, "uFillPass");
 
     std::cout << "STARTUP: Made Compute LOOKUP Locations.\n" << std::flush;
 
@@ -2588,25 +2683,8 @@ int main() {
 		uint32_t s = UINT32_MAX;
 		if (!freeSlots.empty()) {
 			for (auto freeIt = freeSlots.begin(); freeIt != freeSlots.end(); ++freeIt) {
-				uint32_t candidateSlot = *freeIt;
-
-				GLsync fence = slotFences[candidateSlot];
-
-				if (fence == nullptr) {
-					s = candidateSlot;
-
-					freeSlots.erase(freeIt);
-
-					break;
-				}
-
-				GLenum status = glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 0);
-				if (status == GL_ALREADY_SIGNALED || status == GL_CONDITION_SATISFIED) {
-					glDeleteSync(fence);
-
-					slotFences[candidateSlot] = nullptr;
-
-					s = candidateSlot;
+				if (renderFrameCounter - slotLastFrame[*freeIt] >= 3) {
+					s = *freeIt;
 
 					freeSlots.erase(freeIt);
 
@@ -2618,13 +2696,8 @@ int main() {
 				s = freeSlots.front();
 
 				freeSlots.erase(freeSlots.begin());
-				if (slotFences[s] != nullptr) {
-					glClientWaitSync(slotFences[s], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000);
 
-					glDeleteSync(slotFences[s]);
-
-					slotFences[s] = nullptr;
-				}
+				glFinish();
 			}
 		} else {
 			if (nextFreeSlot >= (uint32_t)maxChunkSlots) {
@@ -3052,10 +3125,22 @@ int main() {
 		timeOfDay += deltaTime / dayLengthSec;
 		if (timeOfDay > 1.0f) timeOfDay -= 1.0f;
 
-		float remap = timeOfDay < 0.6f ? timeOfDay * (0.5f / 0.6f) : 0.5f + (timeOfDay - 0.6f) * (0.5f / 0.4f);
-		float sunAng = remap * 2.0f * PI;
+		float sunAng = timeOfDay * 2.0f * PI;
 
 		glm::vec3 sunDir = glm::normalize(glm::vec3(std::cos(sunAng), std::sin(sunAng), 0.0f));
+
+		static int sunJitterIdx = 0;
+
+		sunJitterIdx = (sunJitterIdx + 1) & 15;
+	
+		float jx = (((sunJitterIdx * 7) & 15) / 15.0f) - 0.5f;
+		float jy = (((sunJitterIdx * 11) & 15) / 15.0f) - 0.5f;
+		float jz = (((sunJitterIdx * 13) & 15) / 15.0f) - 0.5f;
+
+		glm::vec3 shadowSunDir = glm::normalize(sunDir + glm::vec3(jx * 0.008f, jy * 0.006f, jz * 0.008f));
+
+		glUniform3f(sunDirLoc, sunDir.x, sunDir.y, sunDir.z);
+		glUniform3f(shadowSunDirLoc, shadowSunDir.x, shadowSunDir.y, shadowSunDir.z);
 
 		glfwGetFramebufferSize(window, &width, &height);
 
@@ -3191,8 +3276,6 @@ int main() {
 
 		float blend = 1.0f;
 
-		glUniform3f(sunDirLoc, sunDir.x, sunDir.y, sunDir.z);
-
 		static int lightingMode = 0;
 
 		glm::vec3 sunColor(1.0f, 0.96f, 0.90f);
@@ -3256,6 +3339,7 @@ int main() {
 		glUniform2fv(sunScreenUVLoc, 1, glm::value_ptr(sunScreenUV));
 
 		glUniform1f(sunVisibleLoc, sunVisible);
+		glUniform1f(fogDensityLoc, (lightingMode == 1) ? 0.0045f : 0.0f);
 
 		int newChunkX = static_cast<int>(std::floor(camPos.x / static_cast<float>(chunkSize)));
 		int newChunkY = static_cast<int>(std::floor(camPos.y / static_cast<float>(chunkSize)));
@@ -3369,7 +3453,7 @@ int main() {
 
 	            		glUniform3iv(giOriginsCLoc, giCascades, (const GLint*)giOrigin);
 
-	            		warmupPasses = 3;
+	            		warmupPasses = 8;
 	            	}
 
 	            	int dim = cascadeDims[c];
@@ -3379,10 +3463,17 @@ int main() {
 	            	glUniform1i(girayCountLoc, cascadeRays[c]);
 
 	            	for (int p = 0; p < warmupPasses; p++) {
-	            		glUniform1i(frameIndexLoc, accumFrame + p);
+	            		glUniform1i(frameIndexLoc, p);
 	            		glDispatchCompute(dim / 4, dim / 4, dim / 4);
 	            		glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 	            	}
+
+	            	glUniform1i(fillPassLoc, 1);
+					
+					glDispatchCompute(dim / 4, dim / 4, dim / 4);
+					glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+					
+					glUniform1i(fillPassLoc, 0);
 	            }
 
 	            giDirty = false;
@@ -3496,20 +3587,14 @@ int main() {
 			if (!mdCounts.empty()) {
 				glMultiDrawElements(GL_TRIANGLES, mdCounts.data(), GL_UNSIGNED_INT, mdIndices.data(), static_cast<GLsizei>(mdCounts.size()));
 
-				GLsync frameFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+				renderFrameCounter++;
 
 				for (const auto& v : vis) {
 					uint64_t k = chunkKey(v.cmd->aabbMin.x / chunkSize, v.cmd->aabbMin.y / chunkSize, v.cmd->aabbMin.z / chunkSize);
 
 					auto it = chunkSlots.find(k);
 					if (it != chunkSlots.end()) {
-						uint32_t slot = it->second;
-
-						if (slotFences[slot] != nullptr) {
-							glDeleteSync(slotFences[slot]);
-						}
-
-						slotFences[slot] = frameFence;
+						slotLastFrame[it->second] = renderFrameCounter;
 					}
 				}
 			}
@@ -3853,7 +3938,7 @@ int main() {
 		
 		glBindVertexArray(0);
 
-		updFpsCounter(window, time, visible, total, triangles);
+		updFpsCounter(window, time, visible, total, triangles, stringed);
 
 		glfwSwapBuffers(window);
 		glfwPollEvents();

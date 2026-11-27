@@ -42,6 +42,7 @@ uniform ivec3 giOrigins[3];
 uniform float giVoxelSizes[3];
 uniform int uGiDim;
 uniform int uRayCount;
+uniform int uFillPass;
 
 int nGi;
 
@@ -97,6 +98,33 @@ void main() {
 	uint localIdx = voxelIndex(p);
 	uint cOffset = uint(uCascadeIndex) * giVoxels;
 	uint gIdx = cOffset + localIdx;
+	if (uFillPass == 1) {
+		if (voxelType[gIdx] == 0u) return;
+
+		vec3 sum = vec3(0.0);
+
+		float wsum = 0.0;
+
+		ivec3 dirs[6] = ivec3[6](ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0), ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1));
+
+		for (int d = 0; d < 6; d++) {
+			ivec3 np = p + dirs[d];
+			if (!insideGrid(np)) continue;
+
+			uint ni = cOffset + voxelIndex(np);
+			if (voxelType[ni] == 0u) {
+				sum += unpackUnorm4x8(giOutput[ni]).rgb;
+				wsum += 1.0;
+			}
+		}
+
+		vec3 avg = (wsum > 0.0) ? sum / wsum : vec3(0.0);
+
+		giHistory[gIdx] = vec4(avg, 1.0);
+    	giOutput[gIdx] = packUnorm4x8(vec4(clamp(avg, 0.0, 1.0), 1.0));
+    	
+    	return;
+	}
 
 	bool hasNearbySolid = false;
 

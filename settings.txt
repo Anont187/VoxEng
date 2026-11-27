@@ -2,7 +2,7 @@
 int pastWidth = 640;
 int pastHeight = 480;
 
-float timeOfDay = 0.15f;  // 0=dawn, 0.25=noon, 0.5=dusk, 0.75=midnight. Start mid-morning.
+float timeOfDay = 0.0f;
 float cameraSpeed = 4.3f;
 float sprintSpeed = 16.0f;
 float baseSensitivity = 0.071f;
@@ -48,8 +48,9 @@ int cascadeRays2 = 5;
 
 int frameGenAmount = 2;
 
-const char* stringed = "basic window";
+const char* stringed = "placeholder";
 const float renderScale = 0.65f;
+const char startTime = "6:00 am";
 
 float ssaoRadius = 0.75f;
 float ssaoBias = 0.003f;
